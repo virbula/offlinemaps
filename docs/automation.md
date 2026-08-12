@@ -33,7 +33,13 @@ The unattended update path:
    exactly one record for each of the 554 regions; duplicates and extras fail.
    Artifact names use the stable workflow `run_id` (not `run_attempt`) and
    overwrite the same plan/shard slot, so both “rerun failed jobs” and “rerun
-   all jobs” resume the same immutable plan safely.
+   all jobs” resume the same immutable plan safely. Before downloading a plan,
+   the prepare job uses its `actions: read` permission to query that exact
+   run/name through the GitHub REST API. Exactly one non-expired artifact for
+   the current run may be reused; duplicates, expired or malformed results
+   fail closed. An absent artifact is accepted only on attempt 1, when the plan
+   has not been prepared yet. A later attempt with no retained plan fails
+   instead of discovering a potentially different source.
 7. The finalizer paginates the numeric release assets endpoint at 100 assets per
    page, verifies an exact set of 554 PMTiles and their byte sizes/SHA-256
    digests, creates the catalog/provenance/checksums, and uploads `catalog.json`

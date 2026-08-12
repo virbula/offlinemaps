@@ -10,9 +10,9 @@ Generate a worldwide EasyElevation PMTiles build manifest.
 Usage:
   dart run tool/offline_maps/generate_worldwide_regions.dart \\
     --manifest config/offline-map-build.json \\
-    --output-manifest maps/build/generated/worldwide-manifest.json \\
-    --cache-dir maps/build/cache \\
-    [--builder-executable maps/build/tools/pmtiles]
+    --output-manifest build/local/generated/worldwide-manifest.json \\
+    --cache-dir build/local/cache \\
+    [--builder-executable build/tools/pmtiles]
 
 The input manifest contains a pinned worldwideRegions boundary configuration.
 The generated manifest contains one global overview plus country/map-unit

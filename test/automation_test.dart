@@ -243,7 +243,34 @@ void main() {
     );
     expect(workflow, contains('max-parallel: 4'));
     expect(workflow, contains("cron: '17 3 8 * *'"));
-    expect(workflow, isNot(contains('github.run_attempt')));
+    expect(workflow, contains('actions: read'));
+    expect(workflow, contains(r'RUN_ATTEMPT: ${{ github.run_attempt }}'));
+    expect(workflow, isNot(contains('continue-on-error: true')));
+    expect(workflow, isNot(contains('steps.prior.outcome')));
+    expect(workflow, contains(r'[[ ! "$RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]'));
+    expect(workflow, contains(r'[[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]]'));
+    expect(workflow, contains(r'artifact_name="release-plan-$RUN_ID"'));
+    expect(workflow, contains(r'--data-urlencode "name=$artifact_name"'));
+    expect(
+      workflow,
+      contains("if: steps.plan_artifact.outputs.exists == 'true'"),
+    );
+    expect(workflow, contains("steps.plan_artifact.outputs.exists != 'true'"));
+    expect(
+      RegExp(
+        r'name:\s+release-plan-\$\{\{ github\.run_id \}\}',
+      ).allMatches(workflow),
+      hasLength(4),
+    );
+    expect(
+      workflow,
+      isNot(contains(r'release-plan-${{ github.run_attempt }}')),
+    );
+    expect(workflow, contains(r'actions/runs/$RUN_ID/artifacts'));
+    expect(workflow, contains('.total_count == 0 or .total_count == 1'));
+    expect(workflow, contains('.expired == false'));
+    expect(workflow, contains(r'.workflow_run.id == $run_id'));
+    expect(workflow, contains(r'[[ "$RUN_ATTEMPT" != "1" ]]'));
     expect(workflow, isNot(contains("path: '*.pmtiles'")));
     expect(workflow, contains('overwrite: true'));
     expect(workflow, contains('retention-days: 30'));

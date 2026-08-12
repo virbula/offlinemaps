@@ -6,6 +6,15 @@ import 'package:crypto/crypto.dart';
 
 import 'release_model.dart';
 
+typedef GitHubApiResponse = ({int statusCode, String body});
+typedef GitHubRequestExecutor =
+    Future<GitHubApiResponse> Function(
+      String method,
+      Uri uri,
+      Map<String, Object?>? jsonBody,
+    );
+typedef GitHubRetryDelay = Future<void> Function(Duration duration);
+
 class GitHubReleaseAsset {
   const GitHubReleaseAsset({
     required this.id,
@@ -69,13 +78,19 @@ class GitHubReleaseClient {
     required this.repository,
     required this.token,
     HttpClient? client,
-  }) : _client = client ?? HttpClient();
+    this.requestExecutor,
+    GitHubRetryDelay? retryDelay,
+  }) : _client = client ?? HttpClient(),
+       _retryDelay = retryDelay ?? _defaultRetryDelay;
 
   final String repository;
   final String token;
   final HttpClient _client;
+  final GitHubRequestExecutor? requestExecutor;
+  final GitHubRetryDelay _retryDelay;
 
   static const String apiVersion = '2022-11-28';
+  static const int _maximumGetAttempts = 5;
 
   void close() => _client.close(force: true);
 
@@ -265,7 +280,8 @@ class GitHubReleaseClient {
             '${_tail(body)}',
           );
         }
-      } on SocketException {
+      } on IOException catch (error) {
+        if (!_isGitHubTransportFailure(error)) rethrow;
         // Reconcile an ambiguous transport failure before a bounded retry.
       }
       final matches = (await listAssets(
@@ -316,31 +332,58 @@ class GitHubReleaseClient {
     Map<String, Object?>? jsonBody,
     Set<int> accepted = const <int>{200},
   }) async {
-    var attempt = 0;
-    while (true) {
-      attempt++;
-      final request = await _open(method, uri);
-      if (jsonBody != null) {
-        request.headers.contentType = ContentType.json;
-        request.write(jsonEncode(jsonBody));
+    final retryable = method == 'GET';
+    final maximumAttempts = retryable ? _maximumGetAttempts : 1;
+    for (var attempt = 1; attempt <= maximumAttempts; attempt++) {
+      late final GitHubApiResponse response;
+      try {
+        response = await _executeRequest(method, uri, jsonBody);
+      } on IOException catch (error) {
+        if (!_isGitHubTransportFailure(error)) rethrow;
+        if (!retryable || attempt == maximumAttempts) {
+          final attempts = attempt == 1 ? 'attempt' : 'attempts';
+          throw AutomationException(
+            'GitHub $method $uri transport failed after $attempt $attempts: '
+            '$error',
+          );
+        }
+        await _retryDelay(_retryBackoff(attempt));
+        continue;
       }
-      final response = await request.close();
-      final body = await utf8.decoder.bind(response).join();
       if (accepted.contains(response.statusCode)) {
-        return _Response(response.statusCode, body);
+        return _Response(response.statusCode, response.body);
       }
-      if (attempt < 5 &&
+      if (retryable &&
+          attempt < maximumAttempts &&
           (response.statusCode == 429 || response.statusCode >= 500)) {
-        await Future<void>.delayed(
-          Duration(seconds: min(16, 1 << (attempt - 1))),
-        );
+        await _retryDelay(_retryBackoff(attempt));
         continue;
       }
       throw AutomationException(
         'GitHub $method $uri returned HTTP ${response.statusCode}: '
-        '${_tail(body)}',
+        '${_tail(response.body)}',
       );
     }
+    throw StateError('Unreachable GitHub request retry state.');
+  }
+
+  Future<GitHubApiResponse> _executeRequest(
+    String method,
+    Uri uri,
+    Map<String, Object?>? jsonBody,
+  ) async {
+    final executor = requestExecutor;
+    if (executor != null) return executor(method, uri, jsonBody);
+    final request = await _open(method, uri);
+    if (jsonBody != null) {
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode(jsonBody));
+    }
+    final response = await request.close();
+    return (
+      statusCode: response.statusCode,
+      body: await utf8.decoder.bind(response).join(),
+    );
   }
 
   Future<HttpClientRequest> _open(String method, Uri uri) async {
@@ -353,6 +396,17 @@ class GitHubReleaseClient {
     return request;
   }
 }
+
+Future<void> _defaultRetryDelay(Duration duration) =>
+    Future<void>.delayed(duration);
+
+Duration _retryBackoff(int failedAttempt) =>
+    Duration(seconds: min(16, 1 << (failedAttempt - 1)));
+
+bool _isGitHubTransportFailure(IOException error) =>
+    error is HandshakeException ||
+    error is SocketException ||
+    error is HttpException;
 
 class _Response {
   const _Response(this.statusCode, this.body);

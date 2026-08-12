@@ -10,4 +10,6 @@ The app catalog URL is:
 
 `https://github.com/virbula/offlinemaps/releases/latest/download/catalog.json`
 
-See [docs/automation.md](docs/automation.md) for operations and recovery.
+Use [docs/local-processing.md](docs/local-processing.md) for local planning,
+building, validation, and explicitly confirmed manual publication. See
+[docs/automation.md](docs/automation.md) for scheduled operations and recovery.

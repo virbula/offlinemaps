@@ -61,6 +61,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: write
     outputs:
       matrix: ${{ steps.outputs.outputs.matrix }}
@@ -82,15 +83,78 @@ jobs:
         with:
           sdk: ${{ env.DART_VERSION }}
       - run: make deps
+      - name: Check for this run's immutable plan
+        id: plan_artifact
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]]; then
+            echo "::error::Invalid workflow run id."
+            exit 1
+          fi
+          if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]{0,8}$ ]]; then
+            echo "::error::Invalid workflow run attempt."
+            exit 1
+          fi
+          if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repository identity."
+            exit 1
+          fi
+          artifact_name="release-plan-$RUN_ID"
+          response="$(mktemp)"
+          trap 'rm -f "$response"' EXIT
+          curl --fail-with-body --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 60 --max-filesize 1048576 \
+            --retry 3 --retry-all-errors --retry-delay 2 \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --get \
+            --data-urlencode "name=$artifact_name" \
+            --data-urlencode 'per_page=100' \
+            --output "$response" \
+            "https://api.github.com/repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts"
+          if ! jq -e --arg name "$artifact_name" --argjson run_id "$RUN_ID" '
+            type == "object" and
+            ((.total_count | type) == "number") and
+            (.total_count == 0 or .total_count == 1) and
+            ((.artifacts | type) == "array") and
+            (.total_count == (.artifacts | length)) and
+            all(.artifacts[];
+              ((.id | type) == "number") and
+              (.id > 0) and
+              (.id == (.id | floor)) and
+              (.name == $name) and
+              (.expired == false) and
+              ((.workflow_run | type) == "object") and
+              (.workflow_run.id == $run_id)
+            )
+          ' "$response" >/dev/null; then
+            echo "::error::Plan artifact lookup returned duplicate, expired, or malformed data."
+            exit 1
+          fi
+          count="$(jq -r '.total_count' "$response")"
+          if [[ "$count" == "0" ]]; then
+            if [[ "$RUN_ATTEMPT" != "1" ]]; then
+              echo "::error::Rerun attempt $RUN_ATTEMPT has no retained immutable plan."
+              exit 1
+            fi
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Reuse this run's immutable plan on rerun
         id: prior
-        continue-on-error: true
+        if: steps.plan_artifact.outputs.exists == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-plan-${{ github.run_id }}
           path: build/plan
       - name: Validate reused plan
-        if: steps.prior.outcome == 'success'
+        if: steps.plan_artifact.outputs.exists == 'true'
         run: |
           set -euo pipefail
           target="${INPUT_TARGET:-$CHECKOUT_SHA}"
@@ -100,10 +164,10 @@ jobs:
             --repository "$REPOSITORY" \
             --target "$target"
       - name: Install pinned PMTiles tool
-        if: steps.prior.outcome != 'success'
+        if: steps.plan_artifact.outputs.exists != 'true'
         run: make tools
       - name: Prepare immutable release plan
-        if: env.INPUT_FINALIZE_EXISTING != 'true' && steps.prior.outcome != 'success'
+        if: env.INPUT_FINALIZE_EXISTING != 'true' && steps.plan_artifact.outputs.exists != 'true'
         run: |
           set -euo pipefail
           mode="$INPUT_MODE"
