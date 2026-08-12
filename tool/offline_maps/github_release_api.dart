@@ -28,13 +28,21 @@ class GitHubReleaseAsset {
   factory GitHubReleaseAsset.fromJson(Object? value) {
     final map = object(value, 'GitHub release asset');
     final digest = optionalString(map['digest'], 'asset.digest');
+    final rawLabel = map['label'];
+    if (rawLabel != null && rawLabel is! String) {
+      throw const AutomationException('asset.label must be a string or null.');
+    }
     return GitHubReleaseAsset(
       id: integer(map['id'], 'asset.id'),
       name: string(map['name'], 'asset.name'),
       size: integer(map['size'], 'asset.size'),
       digest: digest,
       state: string(map['state'], 'asset.state'),
-      label: optionalString(map['label'], 'asset.label'),
+      // GitHub serializes an absent release-asset label as both null and ""
+      // depending on the endpoint. Normalize both forms to one safe value.
+      label: rawLabel is String && rawLabel.trim().isNotEmpty
+          ? rawLabel.trim()
+          : null,
     );
   }
 

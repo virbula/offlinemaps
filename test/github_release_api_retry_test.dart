@@ -7,6 +7,29 @@ import '../tool/offline_maps/github_release_api.dart';
 import '../tool/offline_maps/release_model.dart';
 
 void main() {
+  test('release asset normalizes GitHub blank labels to absent', () {
+    final asset = GitHubReleaseAsset.fromJson(<String, Object?>{
+      'id': 1,
+      'name': 'region.pmtiles',
+      'size': 12,
+      'digest': 'sha256:${'a' * 64}',
+      'state': 'uploaded',
+      'label': '',
+    });
+    expect(asset.label, isNull);
+    expect(
+      () => GitHubReleaseAsset.fromJson(<String, Object?>{
+        'id': 1,
+        'name': 'region.pmtiles',
+        'size': 12,
+        'digest': 'sha256:${'a' * 64}',
+        'state': 'uploaded',
+        'label': 42,
+      }),
+      throwsA(isA<AutomationException>()),
+    );
+  });
+
   test(
     'GET retries supported transport failures with bounded backoff',
     () async {
