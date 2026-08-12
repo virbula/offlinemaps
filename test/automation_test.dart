@@ -443,6 +443,25 @@ void main() {
     expect(workflow, contains(r'(( 10#$INPUT_ITERATION <= 297 ))'));
     expect(workflow, contains(r'test "$INPUT_ITERATION" = 0'));
     expect(workflow, contains('--connect-timeout 15 --max-time 60'));
+    final workflowLines = workflow.split('\n');
+    expect(
+      workflowLines.where(
+        (line) =>
+            line.startsWith('      ') &&
+            !line.startsWith('        ') &&
+            line.contains(r'${{ runner.'),
+      ),
+      isEmpty,
+      reason: 'runner context is unavailable in job-level env',
+    );
+    expect(
+      workflowLines.where(
+        (line) =>
+            line ==
+            r'          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-source-cache',
+      ),
+      hasLength(3),
+    );
     expect(workflow, contains(r'CHECKOUT_SHA: ${{ github.sha }}'));
     expect(workflow, contains(r'--expected-head "$CHECKOUT_SHA"'));
     final directory = await Directory.systemTemp.createTemp('no-op-output-');
