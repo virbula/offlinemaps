@@ -1,0 +1,12 @@
+# Generated PMTiles are uploaded as GitHub Release assets, never committed.
+/*.pmtiles
+/*.pmtiles.part
+/*.pmtiles.previous
+
+# Downloaded tools, boundary cache, generated extraction inputs, and staging.
+/maps/build/
+
+# Interrupted atomic metadata writes.
+/*.tmp
+
+.DS_Store
