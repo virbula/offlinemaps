@@ -167,9 +167,9 @@ Future<void> prepareRoutingBackfill(
             '$supportedValhallaGraphVersion routing graphs.',
       );
     } else if (routingRelease == null && catalogRelease != null) {
-      github.close();
-      throw const AutomationException(
-        'A catalog release without its routing release is not recoverable.',
+      validateRecoverableCatalogOnlyRelease(
+        catalogRelease: catalogRelease,
+        catalogTag: catalogTag,
       );
     }
     if (routingRelease != null) {
@@ -178,7 +178,6 @@ Future<void> prepareRoutingBackfill(
         catalogRelease: catalogRelease!,
         routingTag: routingTag,
         catalogTag: catalogTag,
-        allowDraftTargetMismatch: true,
       );
       final assets = await github.listAssets(routingRelease.id);
       if (assets.isNotEmpty) {
@@ -302,21 +301,33 @@ Future<void> prepareRoutingBackfill(
       );
       mapReleaseId = mapRelease.id;
       if (routingRelease == null) {
-        routingRelease = await client.createDraft(
-          tag: routingTag,
-          target: options.target,
-          title: 'EasyElevation offline routing $routingTag',
-          body: routingReleaseBody,
-        );
-        catalogRelease = await client.createDraft(
-          tag: catalogTag,
-          target: options.target,
-          title: 'EasyElevation offline catalog $catalogTag',
-          body:
-              'Joined EasyElevation offline catalog referencing immutable '
-              '$mapTag road maps and $routingTag Valhalla '
-              '$supportedValhallaGraphVersion routing graphs.',
-        );
+        if (catalogRelease == null) {
+          routingRelease = await client.createDraft(
+            tag: routingTag,
+            target: options.target,
+            title: 'EasyElevation offline routing $routingTag',
+            body: routingReleaseBody,
+          );
+          catalogRelease = await client.createDraft(
+            tag: catalogTag,
+            target: options.target,
+            title: 'EasyElevation offline catalog $catalogTag',
+            body:
+                'Joined EasyElevation offline catalog referencing immutable '
+                '$mapTag road maps and $routingTag Valhalla '
+                '$supportedValhallaGraphVersion routing graphs.',
+          );
+        } else {
+          final recovered = await recoverMissingRoutingDraft(
+            github: client,
+            catalogRelease: catalogRelease,
+            routingTag: routingTag,
+            catalogTag: catalogTag,
+            routingReleaseBody: routingReleaseBody,
+          );
+          routingRelease = recovered.routingRelease;
+          catalogRelease = recovered.catalogRelease;
+        }
       }
       var routes = routingRelease;
       var joinedCatalog = catalogRelease!;
@@ -326,35 +337,10 @@ Future<void> prepareRoutingBackfill(
         routingTag: routingTag,
         catalogTag: catalogTag,
       );
-      if (!resumedPlan &&
-          routes.draft &&
-          joinedCatalog.draft &&
-          (routes.targetCommitish.toLowerCase() != options.target ||
-              joinedCatalog.targetCommitish.toLowerCase() != options.target)) {
-        await _requireCoordinatedDraftsAreEmpty(
-          client,
-          routingRelease: routes,
-          catalogRelease: joinedCatalog,
-          routingTag: routingTag,
-          catalogTag: catalogTag,
-        );
-        routes = await client.retargetEmptyDraft(
-          release: routes,
-          tag: routingTag,
-          target: options.target,
-        );
-        joinedCatalog = await client.retargetEmptyDraft(
-          release: joinedCatalog,
-          tag: catalogTag,
-          target: options.target,
-        );
-      }
-      validateRecoverableRoutingReleasePair(
-        routingRelease: routes,
-        catalogRelease: joinedCatalog,
-        routingTag: routingTag,
-        catalogTag: catalogTag,
-      );
+      // Existing coordinated releases retain their original shared target.
+      // Updating only target_commitish on a GitHub draft can replace its tag
+      // name with an "untagged-*" placeholder. The numeric release IDs, exact
+      // tags, shared full-SHA target, and immutable plan remain authoritative.
       coordinatedTarget = routes.targetCommitish.toLowerCase();
       requiresBuild = routes.draft;
       await _ensureRoutingPlanAsset(
@@ -655,41 +641,11 @@ Future<void> _writeCollectedReports({
   }
 }
 
-Future<void> _requireCoordinatedDraftsAreEmpty(
-  GitHubReleaseClient github, {
-  required GitHubRelease routingRelease,
-  required GitHubRelease catalogRelease,
-  required String routingTag,
-  required String catalogTag,
-}) async {
-  for (final entry in <(GitHubRelease, String)>[
-    (routingRelease, routingTag),
-    (catalogRelease, catalogTag),
-  ]) {
-    final release = entry.$1;
-    if (release.tagName != entry.$2 || !release.draft || release.prerelease) {
-      throw const AutomationException(
-        'Only the exact coordinated drafts may be recovered.',
-      );
-    }
-  }
-  final assets = await Future.wait(<Future<List<GitHubReleaseAsset>>>[
-    github.listAssets(routingRelease.id),
-    github.listAssets(catalogRelease.id),
-  ]);
-  if (assets.any((values) => values.isNotEmpty)) {
-    throw const AutomationException(
-      'A coordinated draft has assets and cannot be retargeted.',
-    );
-  }
-}
-
 void validateRecoverableRoutingReleasePair({
   required GitHubRelease routingRelease,
   required GitHubRelease catalogRelease,
   required String routingTag,
   required String catalogTag,
-  bool allowDraftTargetMismatch = false,
 }) {
   final routingTarget = routingRelease.targetCommitish.toLowerCase();
   final catalogTarget = catalogRelease.targetCommitish.toLowerCase();
@@ -699,15 +655,68 @@ void validateRecoverableRoutingReleasePair({
       catalogRelease.prerelease ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(routingTarget) ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(catalogTarget) ||
-      (routingTarget != catalogTarget &&
-          !(allowDraftTargetMismatch &&
-              routingRelease.draft &&
-              catalogRelease.draft)) ||
+      routingTarget != catalogTarget ||
       (routingRelease.draft && !catalogRelease.draft)) {
     throw const AutomationException(
       'Routing and catalog releases are not in a recoverable coordinated state.',
     );
   }
+}
+
+void validateRecoverableCatalogOnlyRelease({
+  required GitHubRelease catalogRelease,
+  required String catalogTag,
+}) {
+  final target = catalogRelease.targetCommitish.toLowerCase();
+  if (catalogRelease.tagName != catalogTag ||
+      !catalogRelease.draft ||
+      catalogRelease.prerelease ||
+      !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
+    throw const AutomationException(
+      'The catalog-only draft is not safely recoverable.',
+    );
+  }
+}
+
+Future<({GitHubRelease routingRelease, GitHubRelease catalogRelease})>
+recoverMissingRoutingDraft({
+  required GitHubReleaseClient github,
+  required GitHubRelease catalogRelease,
+  required String routingTag,
+  required String catalogTag,
+  required String routingReleaseBody,
+}) async {
+  final currentCatalog = await github.releaseById(catalogRelease.id);
+  if (currentCatalog.id != catalogRelease.id ||
+      currentCatalog.tagName != catalogRelease.tagName ||
+      currentCatalog.targetCommitish.toLowerCase() !=
+          catalogRelease.targetCommitish.toLowerCase() ||
+      currentCatalog.draft != catalogRelease.draft ||
+      currentCatalog.prerelease != catalogRelease.prerelease) {
+    throw const AutomationException('Catalog draft identity changed.');
+  }
+  validateRecoverableCatalogOnlyRelease(
+    catalogRelease: currentCatalog,
+    catalogTag: catalogTag,
+  );
+  if ((await github.listAssets(currentCatalog.id)).isNotEmpty) {
+    throw const AutomationException(
+      'A catalog-only draft with assets is not safely recoverable.',
+    );
+  }
+  final routingRelease = await github.createDraft(
+    tag: routingTag,
+    target: currentCatalog.targetCommitish.toLowerCase(),
+    title: 'EasyElevation offline routing $routingTag',
+    body: routingReleaseBody,
+  );
+  validateRecoverableRoutingReleasePair(
+    routingRelease: routingRelease,
+    catalogRelease: currentCatalog,
+    routingTag: routingTag,
+    catalogTag: catalogTag,
+  );
+  return (routingRelease: routingRelease, catalogRelease: currentCatalog);
 }
 
 void _validateResumableManifest({

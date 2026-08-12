@@ -553,21 +553,159 @@ void main() {
       throwsA(isA<AutomationException>()),
     );
     expect(
-      () => validateRecoverableRoutingReleasePair(
-        routingRelease: release(id: 1, tag: 'routing-2026.08.1', draft: true),
-        catalogRelease: release(
-          id: 2,
-          tag: 'catalog-2026.08.1',
+      () => validate(true, true, catalogTarget: 'b' * 40),
+      throwsA(isA<AutomationException>()),
+    );
+  });
+
+  test(
+    'catalog-only recovery creates routing at the immutable catalog target',
+    () async {
+      final requests = <(String, String, Map<String, Object?>?)>[];
+      final catalogTarget = 'a' * 40;
+      Map<String, Object?> releaseJson({
+        required int id,
+        required String tag,
+        required String target,
+      }) => <String, Object?>{
+        'id': id,
+        'tag_name': tag,
+        'target_commitish': target,
+        'draft': true,
+        'prerelease': false,
+      };
+      final client = GitHubReleaseClient(
+        repository: 'virbula/offlinemaps',
+        token: 'test-token',
+        requestExecutor: (method, uri, jsonBody) async {
+          requests.add((method, uri.path, jsonBody));
+          if (method == 'GET' && uri.path.endsWith('/releases/12')) {
+            return (
+              statusCode: 200,
+              body: jsonEncode(
+                releaseJson(
+                  id: 12,
+                  tag: 'catalog-2026.08.1',
+                  target: catalogTarget,
+                ),
+              ),
+            );
+          }
+          if (method == 'GET' && uri.path.endsWith('/releases/12/assets')) {
+            return (statusCode: 200, body: '[]');
+          }
+          if (method == 'POST' && uri.path.endsWith('/releases')) {
+            return (
+              statusCode: 201,
+              body: jsonEncode(
+                releaseJson(
+                  id: 13,
+                  tag: 'routing-2026.08.1',
+                  target: jsonBody!['target_commitish']! as String,
+                ),
+              ),
+            );
+          }
+          throw StateError('Unexpected request: $method $uri');
+        },
+      );
+      addTearDown(client.close);
+
+      final recovered = await recoverMissingRoutingDraft(
+        github: client,
+        catalogRelease: GitHubRelease(
+          id: 12,
+          tagName: 'catalog-2026.08.1',
+          targetCommitish: catalogTarget,
           draft: true,
-          target: 'b' * 40,
+          prerelease: false,
         ),
         routingTag: 'routing-2026.08.1',
         catalogTag: 'catalog-2026.08.1',
-        allowDraftTargetMismatch: true,
-      ),
-      returnsNormally,
+        routingReleaseBody: 'reviewed attribution',
+      );
+
+      expect(recovered.catalogRelease.targetCommitish, catalogTarget);
+      expect(recovered.routingRelease.targetCommitish, catalogTarget);
+      final creates = requests.where((request) => request.$1 == 'POST');
+      expect(creates, hasLength(1));
+      expect(creates.single.$3!['target_commitish'], catalogTarget);
+      expect(requests.where((request) => request.$1 == 'PATCH'), isEmpty);
+    },
+  );
+
+  test('catalog-only recovery refuses a draft containing assets', () async {
+    var created = false;
+    final target = 'a' * 40;
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        if (method == 'GET' && uri.path.endsWith('/releases/12')) {
+          return (
+            statusCode: 200,
+            body: jsonEncode(<String, Object?>{
+              'id': 12,
+              'tag_name': 'catalog-2026.08.1',
+              'target_commitish': target,
+              'draft': true,
+              'prerelease': false,
+            }),
+          );
+        }
+        if (method == 'GET' && uri.path.endsWith('/releases/12/assets')) {
+          return (
+            statusCode: 200,
+            body: jsonEncode(<Object?>[
+              <String, Object?>{
+                'id': 99,
+                'name': 'unexpected.json',
+                'size': 1,
+                'digest': 'sha256:${'b' * 64}',
+                'state': 'uploaded',
+                'label': null,
+              },
+            ]),
+          );
+        }
+        if (method == 'POST') created = true;
+        throw StateError('Unexpected request: $method $uri');
+      },
     );
+    addTearDown(client.close);
+
+    await expectLater(
+      recoverMissingRoutingDraft(
+        github: client,
+        catalogRelease: GitHubRelease(
+          id: 12,
+          tagName: 'catalog-2026.08.1',
+          targetCommitish: target,
+          draft: true,
+          prerelease: false,
+        ),
+        routingTag: 'routing-2026.08.1',
+        catalogTag: 'catalog-2026.08.1',
+        routingReleaseBody: 'reviewed attribution',
+      ),
+      throwsA(isA<AutomationException>()),
+    );
+    expect(created, isFalse);
   });
+
+  test(
+    'routing automation never retargets existing release identities',
+    () async {
+      final client = await File(
+        'tool/offline_maps/github_release_api.dart',
+      ).readAsString();
+      final prepare = await File(
+        'tool/offline_maps/prepare_routing_backfill.dart',
+      ).readAsString();
+      expect(client, isNot(contains('retargetEmptyDraft')));
+      expect(prepare, isNot(contains('retargetEmptyDraft')));
+    },
+  );
 
   test('routing sync recognizes only its exact prior atomic commit', () {
     bool validate({

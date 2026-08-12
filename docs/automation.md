@@ -111,8 +111,11 @@ plan. This retains recovery data across failures while preventing roughly
 
 The workflows use immutable numeric release IDs and verify tag, target commit,
 draft/prerelease state, exact asset sets, labels, sizes, and digests before
-mutation. Empty coordinated drafts may be retargeted. Once a plan exists, its
-original target and bytes are authoritative.
+mutation. Existing coordinated releases retain their original shared full-SHA
+target, even before a plan is uploaded: release targets and tags are never
+retargeted. Once a plan exists, its original target and bytes are authoritative.
+If creation was interrupted after an empty catalog draft was created, recovery
+may create only the missing routing draft at that catalog's exact target.
 
 The routing release and joined catalog can resume from these states:
 

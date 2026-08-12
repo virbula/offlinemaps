@@ -184,51 +184,6 @@ class GitHubReleaseClient {
     return GitHubRelease.fromJson(jsonDecode(response.body));
   }
 
-  /// Retargets an exact, empty draft after a workflow-only failure.
-  ///
-  /// A draft that already contains an asset is never mutated because its
-  /// contents may have been produced for the original reviewed target.
-  Future<GitHubRelease> retargetEmptyDraft({
-    required GitHubRelease release,
-    required String tag,
-    required String target,
-  }) async {
-    if (release.tagName != tag || !release.draft || release.prerelease) {
-      throw AutomationException(
-        'Only the exact non-prerelease draft $tag may be retargeted.',
-      );
-    }
-    if (!RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
-      throw const AutomationException(
-        'Draft recovery target must be a full lowercase commit SHA.',
-      );
-    }
-    if (release.targetCommitish.toLowerCase() == target) return release;
-    if ((await listAssets(release.id)).isNotEmpty) {
-      throw AutomationException(
-        'Draft $tag has assets and cannot be safely retargeted.',
-      );
-    }
-    final updated = await _patchRelease(release.id, <String, Object?>{
-      'target_commitish': target,
-    });
-    if (updated.id != release.id ||
-        updated.tagName != tag ||
-        updated.targetCommitish.toLowerCase() != target ||
-        !updated.draft ||
-        updated.prerelease) {
-      throw AutomationException(
-        'GitHub returned an unexpected release after retargeting $tag.',
-      );
-    }
-    if ((await listAssets(release.id)).isNotEmpty) {
-      throw AutomationException(
-        'Draft $tag gained assets during retargeting; recovery stopped.',
-      );
-    }
-    return updated;
-  }
-
   Future<List<GitHubReleaseAsset>> listAssets(int releaseId) async {
     final result = <GitHubReleaseAsset>[];
     // Page 11 is an intentional overflow probe: page 10 may contain exactly
