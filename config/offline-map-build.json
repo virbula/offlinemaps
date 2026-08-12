@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-12T00:30:00Z",
+  "githubRepository": "virbula/offlinemaps",
+  "releaseTag": "maps-2026.08.1",
+  "source": {
+    "url": "https://build.protomaps.com/20260811.pmtiles",
+    "metadataUrl": "https://build-metadata.protomaps.dev/builds.json",
+    "key": "20260811.pmtiles",
+    "tilesetVersion": "4.15.1",
+    "exactBytes": 137295889397,
+    "blake3": "b2aa7f4b1858ec873bd2fb6aff1393ce330ad4d236f2b4f9ad1875e910c1eb8e"
+  },
+  "builder": {
+    "executable": "maps/build/tools/pmtiles",
+    "version": "1.30.1",
+    "downloadThreads": 4
+  },
+  "worldwideRegions": {
+    "version": "2026.08.1",
+    "minZoom": 5,
+    "maxZoom": 12,
+    "overviewMaxZoom": 5,
+    "sourceId": "protomaps-20260811",
+    "attribution": "© Protomaps © OpenStreetMap contributors",
+    "attributionUrl": "https://www.openstreetmap.org/copyright",
+    "admin0": {
+      "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_admin_0_map_units.geojson",
+      "exactBytes": 3179420,
+      "sha256": "b8d421aca6e9e08e8cdf09cc26af111cc3e0deba4fe915611d58ade71e8a4db0"
+    },
+    "admin1": {
+      "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_admin_1_states_provinces.geojson",
+      "exactBytes": 2325694,
+      "sha256": "69a0e06e640b2d505858ae1cb63034e4677f3000b35a98e16312932b98c426b9"
+    }
+  }
+}

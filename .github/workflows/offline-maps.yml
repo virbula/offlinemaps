@@ -1,0 +1,270 @@
+name: Build and publish offline maps
+
+on:
+  schedule:
+    - cron: '17 3 8 * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Detect a new retained source or resume the configured draft
+        required: true
+        type: choice
+        default: update
+        options:
+          - update
+          - resume-existing
+      target_commit:
+        description: Full 40-character release target SHA; blank uses this workflow commit
+        required: false
+        type: string
+      dry_run:
+        description: Validate and plan without creating or modifying a release
+        required: true
+        type: boolean
+        default: false
+      finalize_existing:
+        description: Re-verify a public non-latest release and promote it (manual recovery only)
+        required: true
+        type: boolean
+        default: false
+      recovery_tag:
+        description: Exact maps-YYYY.MM.REVISION tag for finalize-existing recovery
+        required: false
+        type: string
+
+concurrency:
+  group: offlinemaps-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DART_VERSION: '3.12.2'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make check
+
+  prepare:
+    needs: check
+    if: github.event_name != 'workflow_dispatch' || !inputs.finalize_existing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.outputs.outputs.matrix }}
+      dry_run: ${{ steps.outputs.outputs.dry_run }}
+      no_op: ${{ steps.outputs.outputs.no_op }}
+    env:
+      INPUT_MODE: ${{ github.event_name == 'schedule' && 'update' || inputs.mode }}
+      INPUT_TARGET: ${{ inputs.target_commit }}
+      INPUT_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      INPUT_FINALIZE_EXISTING: ${{ github.event_name == 'workflow_dispatch' && inputs.finalize_existing || false }}
+      CHECKOUT_SHA: ${{ github.sha }}
+      REPOSITORY: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - name: Reuse this run's immutable plan on rerun
+        id: prior
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-plan-${{ github.run_id }}
+          path: build/plan
+      - name: Validate reused plan
+        if: steps.prior.outcome == 'success'
+        run: |
+          set -euo pipefail
+          target="${INPUT_TARGET:-$CHECKOUT_SHA}"
+          dart run tool/offline_maps/validate_plan.dart \
+            --plan-dir build/plan \
+            --mode "$INPUT_MODE" \
+            --repository "$REPOSITORY" \
+            --target "$target"
+      - name: Install pinned PMTiles tool
+        if: steps.prior.outcome != 'success'
+        run: make tools
+      - name: Prepare immutable release plan
+        if: env.INPUT_FINALIZE_EXISTING != 'true' && steps.prior.outcome != 'success'
+        run: |
+          set -euo pipefail
+          mode="$INPUT_MODE"
+          target="${INPUT_TARGET:-$CHECKOUT_SHA}"
+          extra=()
+          if [[ "$INPUT_DRY_RUN" == "true" ]]; then extra+=(--dry-run); fi
+          dart run tool/offline_maps/prepare_release.dart \
+            --mode "$mode" \
+            --repository "$REPOSITORY" \
+            --target "$target" \
+            --base-config config/offline-map-build.json \
+            --resume-catalog catalog.json \
+            --output-dir build/plan \
+            --cache-dir build/cache \
+            --pmtiles-command build/tools/pmtiles \
+            "${extra[@]}"
+          if [[ "$mode" == "resume-existing" && "$(jq -r .releaseTag build/plan/release.json)" == "maps-2026.08.1" ]]; then
+            echo "c6f8917eb8fb27a59ba1881a5439e5599da641110a2c652bf8f192f0baa732a7  build/expected/manifest-maps-2026.08.1.json" | sha256sum --check --strict
+            cp build/expected/manifest-maps-2026.08.1.json build/plan/manifest.json
+          fi
+      - name: Expose compact matrix only
+        id: outputs
+        if: env.INPUT_FINALIZE_EXISTING != 'true'
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c . build/plan/matrix.json)"
+          test "${#matrix}" -lt 900000
+          no_op="$(jq -r '.noOp // false' build/plan/release.json)"
+          printf 'matrix=%s\ndry_run=%s\nno_op=%s\n' "$matrix" "$INPUT_DRY_RUN" "$no_op" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: env.INPUT_FINALIZE_EXISTING != 'true'
+        with:
+          name: release-plan-${{ github.run_id }}
+          path: build/plan/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          overwrite: true
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.no_op != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.finalize_existing)
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    permissions:
+      contents: write
+    env:
+      SHARD: ${{ matrix.shard }}
+      REGION_IDS_JSON: ${{ toJSON(matrix.regionIds) }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps tools
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-plan-${{ github.run_id }}
+          path: build/plan
+      - name: Build, verify, upload, and delete each pack
+        run: |
+          set -euo pipefail
+          region_ids="$(jq -er 'if type == "array" and length >= 1 and length <= 3 and all(.[]; test("^[a-z0-9][a-z0-9._-]{0,62}$")) then join(",") else error("invalid region matrix") end' <<< "$REGION_IDS_JSON")"
+          dart run tool/offline_maps/build_shard.dart \
+            --manifest build/plan/manifest.json \
+            --release build/plan/release.json \
+            --shard "$SHARD" \
+            --region-ids "$region_ids" \
+            --pmtiles-command build/tools/pmtiles \
+            --output-dir build/pack \
+            --report "build/report-$SHARD.json"
+          test -z "$(find build/pack -type f -name '*.pmtiles' -print -quit)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: map-report-${{ github.run_id }}-${{ matrix.shard }}
+          path: build/report-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          overwrite: true
+
+  finalize:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.no_op != 'true' && (github.event_name != 'workflow_dispatch' || !inputs.finalize_existing)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CHECKOUT_SHA: ${{ github.sha }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-plan-${{ github.run_id }}
+          path: build/plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: map-report-${{ github.run_id }}-*
+          path: build/reports
+          merge-multiple: false
+      - name: Verify exact release and publish catalog last
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/finalize_release.dart \
+            --manifest build/plan/manifest.json \
+            --release build/plan/release.json \
+            --reports-dir build/reports \
+            --output-dir build/metadata \
+            --authoritative-dir .
+      - name: Atomically sync verified metadata to main
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/sync_metadata.dart \
+            --repository "$REPOSITORY" \
+            --expected-head "$CHECKOUT_SHA" \
+            --plan-dir build/plan \
+            --metadata-dir build/metadata
+
+  recover-latest:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' && inputs.finalize_existing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      INPUT_TARGET: ${{ inputs.target_commit }}
+      RECOVERY_TAG: ${{ inputs.recovery_tag }}
+      CHECKOUT_SHA: ${{ github.sha }}
+      REPOSITORY: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - name: Reverify published assets and promote latest
+        run: |
+          set -euo pipefail
+          target="${INPUT_TARGET:-$CHECKOUT_SHA}"
+          dart run tool/offline_maps/recover_latest.dart \
+            --repository "$REPOSITORY" \
+            --target "$target" \
+            --tag "$RECOVERY_TAG" \
+            --work-dir build/recovery

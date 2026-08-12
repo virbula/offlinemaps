@@ -1,12 +1,15 @@
-# Generated PMTiles are uploaded as GitHub Release assets, never committed.
-/*.pmtiles
-/*.pmtiles.part
-/*.pmtiles.previous
+# Generated PMTiles are GitHub Release assets, never Git commits.
+*.pmtiles
+*.pmtiles.part
+*.pmtiles.previous
+*.part
 
-# Downloaded tools, boundary cache, generated extraction inputs, and staging.
-/maps/build/
+# Build scratch is ignored except for the immutable first-release takeover
+# manifest whose SHA-256 is checked by the workflow.
+build/*
+!build/expected/
+!build/expected/**
 
-# Interrupted atomic metadata writes.
-/*.tmp
-
+.dart_tool/
+*.tmp
 .DS_Store
