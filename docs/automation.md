@@ -20,31 +20,48 @@ The unattended update path:
    rerun cannot silently change an immutable release.
 3. Regenerates the pinned Natural Earth 5.1.2 country/subdivision geometry and
    asserts exactly 554 unique packs.
-4. Assigns at most three regions to each of 185 size-balanced matrix shards
+4. Resolves exact country/subdivision matches from Geofabrik's machine index to
+   immutable dated PBF URLs and pins Content-Length plus the provider MD5. This
+   preparation never downloads PBF bodies and enforces configured minimum
+   region/country coverage across Africa, Asia, Europe, North America, Oceania,
+   and South America.
+5. Assigns at most three regions to each of 185 size-balanced matrix shards
    (`max-parallel: 4`, below GitHub's 256-job matrix cap).
-5. Each Ubuntu 24.04 runner uses the SHA-256-pinned PMTiles 1.30.1 CLI to range
+6. Each Ubuntu 24.04 runner uses the SHA-256-pinned PMTiles 1.30.1 CLI to range
    extract one pack, run `pmtiles verify`, independently inspect its header and
    metadata, upload directly to the numeric draft release ID, verify GitHub's
    reported size/SHA-256, and delete the local archive before the next pack.
    PMTiles are never put into Actions artifacts or caches. Peak disk remains
    below the standard hosted runner's 14 GB limit.
-6. Each shard uploads only a tiny, uniquely named JSON build report as a
+   A routing-enabled region also downloads one PBF, verifies size/provider
+   digest, records a computed SHA-256, builds with the digest-pinned Valhalla
+   image and no container network, uploads the graph to a coordinated routing
+   draft, then deletes both PBF and graph before the next region. Catalog
+   descriptors carry the configured Valhalla engine version so an app cannot
+   load a graph built for an incompatible routing runtime.
+7. Each shard uploads only a tiny, uniquely named JSON build report as a
    30-day Actions artifact. The finalizer requires exactly 185 reports and
    exactly one record for each of the 554 regions; duplicates and extras fail.
    Artifact names use the stable workflow `run_id` (not `run_attempt`) and
-   overwrite the same plan/shard slot, so both “rerun failed jobs” and “rerun
-   all jobs” resume the same immutable plan safely. Before downloading a plan,
+   overwrite the same plan/shard slot. A rerun safely retains completed
+   reports; if a routing asset was uploaded but its shard report was lost, the
+   workflow fails closed and requires a fresh release version/tag because
+   Valhalla graph bytes are not guaranteed reproducible across separate builds.
+   Before downloading a plan,
    the prepare job uses its `actions: read` permission to query that exact
    run/name through the GitHub REST API. Exactly one non-expired artifact for
    the current run may be reused; duplicates, expired or malformed results
    fail closed. An absent artifact is accepted only on attempt 1, when the plan
    has not been prepared yet. A later attempt with no retained plan fails
    instead of discovering a potentially different source.
-7. The finalizer paginates the numeric release assets endpoint at 100 assets per
+8. The finalizer verifies and publishes the exact routing release first with
+   `make_latest=false`, including OSM/Geofabrik/ODbL release notes, and checks
+   every public graph before exposing a catalog that references it.
+9. The finalizer paginates the numeric map release assets endpoint at 100 assets per
    page, verifies an exact set of 554 PMTiles and their byte sizes/SHA-256
    digests, creates the catalog/provenance/checksums, and uploads `catalog.json`
    last. It then repeats a fresh exact 558-asset check.
-8. The release becomes public with `make_latest=false`. Tagged URLs and range
+10. The map release becomes public with `make_latest=false`. Tagged URLs and range
    behavior are verified before a second PATCH makes it latest. The stable
    `releases/latest/download/catalog.json` bytes are then verified.
 
@@ -84,7 +101,12 @@ bypasses branch protection.
 
 Because the workflow uses the numeric release ID and checks tag, target commit,
 draft/prerelease state before every mutation, reruns are idempotent. A matching
-asset is kept; an absent one is built/uploaded; any mismatch stops the run.
+asset with a retained exact descriptor is kept; an absent one is
+built/uploaded; and any mismatch stops the run. Valhalla 3.6.3 graph bytes are
+not reproducible across builds, so the graph upload atomically records its PBF
+source SHA-256 in the GitHub asset label. A rerun can safely reconstruct the
+descriptor from that label plus GitHub's exact graph size and SHA-256 without
+rebuilding or replacing the graph.
 
 ## Repository security
 
@@ -115,3 +137,10 @@ make check
 The test suite verifies the 554-to-185 shard plan and the 256-job bound,
 deterministic versioning, release identity, exact asset digest matching,
 duplicate/missing report rejection, and canonical JSON comparisons.
+
+Map and graph releases remain separate because the paired global set can exceed
+GitHub's 1,000-asset release cap. The latest map catalog is the single join
+point. Recovery validates the exact public asset sets and descriptors in both
+releases before promoting the map release. Regions lacking an exact safe
+Geofabrik extract remain explicit map-only entries; the configured worldwide
+coverage contract prevents an unexpectedly sparse routing release.

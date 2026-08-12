@@ -40,6 +40,27 @@ void main() {
         planShards(regions.reversed.toList(), priorSizes: const {}),
       );
     });
+
+    test('heavy routing inputs are spread across size-balanced shards', () {
+      final regions = List.generate(
+        554,
+        (index) => <String, Object?>{
+          'id': 'r-$index',
+          if (index < 6)
+            'routingBuild': <String, Object?>{
+              'source': <String, Object?>{'exactBytes': 500000000},
+            },
+        },
+      );
+      final shards = planShards(regions, priorSizes: const <String, int>{});
+      final heavyShardIndexes = <int>{};
+      for (var index = 0; index < shards.length; index++) {
+        if (shards[index].any((id) => int.parse(id.substring(2)) < 6)) {
+          heavyShardIndexes.add(index);
+        }
+      }
+      expect(heavyShardIndexes, hasLength(6));
+    });
   });
 
   group('source identity', () {

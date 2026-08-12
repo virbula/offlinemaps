@@ -59,7 +59,7 @@ jobs:
     needs: check
     if: github.event_name != 'workflow_dispatch' || !inputs.finalize_existing
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 360
     permissions:
       actions: read
       contents: write
@@ -168,6 +168,7 @@ jobs:
         run: make tools
       - name: Prepare immutable release plan
         if: env.INPUT_FINALIZE_EXISTING != 'true' && steps.plan_artifact.outputs.exists != 'true'
+        timeout-minutes: 360
         run: |
           set -euo pipefail
           mode="$INPUT_MODE"
@@ -198,7 +199,7 @@ jobs:
           no_op="$(jq -r '.noOp // false' build/plan/release.json)"
           printf 'matrix=%s\ndry_run=%s\nno_op=%s\n' "$matrix" "$INPUT_DRY_RUN" "$no_op" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: env.INPUT_FINALIZE_EXISTING != 'true'
+        if: env.INPUT_FINALIZE_EXISTING != 'true' && steps.plan_artifact.outputs.exists != 'true'
         with:
           name: release-plan-${{ github.run_id }}
           path: build/plan/
@@ -234,6 +235,18 @@ jobs:
         with:
           name: release-plan-${{ github.run_id }}
           path: build/plan
+      - name: Pull immutable Valhalla builder when this shard needs routing
+        run: |
+          set -euo pipefail
+          if jq -e --argjson ids "$REGION_IDS_JSON" '
+            any(.regions[] as $region;
+              ($ids | index($region.id)) != null and
+              ($region | has("routingBuild")))
+          ' build/plan/manifest.json >/dev/null; then
+            image="$(jq -er '.routingBuilder.image | select(type == "string")' build/plan/manifest.json)"
+            [[ "$image" =~ ^ghcr\.io/valhalla/valhalla:[0-9]+\.[0-9]+\.[0-9]+@sha256:[a-f0-9]{64}$ ]]
+            docker pull "$image"
+          fi
       - name: Build, verify, upload, and delete each pack
         run: |
           set -euo pipefail
@@ -247,6 +260,7 @@ jobs:
             --output-dir build/pack \
             --report "build/report-$SHARD.json"
           test -z "$(find build/pack -type f -name '*.pmtiles' -print -quit)"
+          test -z "$(find build/pack -type f -name '*.vtiles.tar' -print -quit)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: map-report-${{ github.run_id }}-${{ matrix.shard }}

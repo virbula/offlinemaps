@@ -123,6 +123,22 @@ void main() {
         ),
       ),
     );
+    expect(
+      () => GitHubPublishOptions.parse(<String>[
+        '--manifest',
+        manifestFile.path,
+        '--input-dir',
+        outputDirectory.path,
+        '--resume-draft',
+      ]),
+      throwsA(
+        isA<GitHubPublishException>().having(
+          (error) => error.message,
+          'message',
+          contains('requires --target'),
+        ),
+      ),
+    );
   });
 
   test(
@@ -170,11 +186,13 @@ void main() {
               <Object?>[
                 <String, Object?>{
                   'tag_name': 'maps-2026.08.1',
+                  'target_commitish': 'a' * 40,
                   'id': 24680,
                   'upload_url':
                       'https://uploads.github.com/repos/virbula/offlinemaps/'
                       'releases/24680/assets{?name,label}',
                   'draft': true,
+                  'prerelease': false,
                   'assets': <Object?>[
                     <String, Object?>{
                       'name': 'catalog.json',
@@ -217,10 +235,13 @@ void main() {
   test('uploads binary assets through the immutable release upload URL', () {
     final release = GitHubRemoteRelease.fromJson(<String, Object?>{
       'id': 24680,
+      'tag_name': 'maps-2026.08.1',
+      'target_commitish': 'a' * 40,
       'upload_url':
           'https://uploads.github.com/repos/virbula/offlinemaps/releases/'
           '24680/assets{?name,label}',
       'draft': true,
+      'prerelease': false,
       'assets': const <Object?>[],
     }, expectedRepository: 'virbula/offlinemaps');
     final asset = GitHubPublishAsset(
@@ -250,13 +271,48 @@ void main() {
     );
   });
 
+  test('routing upload URL carries its atomic source provenance label', () {
+    final release = GitHubRemoteRelease.fromJson(<String, Object?>{
+      'id': 24681,
+      'tag_name': 'routing-2026.08.1',
+      'target_commitish': 'a' * 40,
+      'upload_url':
+          'https://uploads.github.com/repos/virbula/offlinemaps/releases/'
+          '24681/assets{?name,label}',
+      'draft': true,
+      'prerelease': false,
+      'assets': const <Object?>[],
+    }, expectedRepository: 'virbula/offlinemaps');
+    final label = 'easyelevation-routing-source-sha256:${'b' * 64}';
+    final asset = GitHubPublishAsset(
+      localFile: File('${temporary.path}/route.vtiles.tar'),
+      name: 'ad-road-routing-2026.08.1.vtiles.tar',
+      publicUrl: Uri.parse('https://example.test/route'),
+      exactBytes: 1,
+      sha256: 'a' * 64,
+      label: label,
+    );
+
+    final uploadUrl = Uri.parse(
+      gitHubReleaseAssetUploadArguments(
+        release: release,
+        asset: asset,
+      ).firstWhere((value) => value.startsWith('https://uploads.github.com')),
+    );
+    expect(uploadUrl.queryParameters['name'], asset.name);
+    expect(uploadUrl.queryParameters['label'], label);
+  });
+
   test('publishes a draft by immutable release ID', () {
     final release = GitHubRemoteRelease.fromJson(<String, Object?>{
       'id': 24680,
+      'tag_name': 'maps-2026.08.1',
+      'target_commitish': 'a' * 40,
       'upload_url':
           'https://uploads.github.com/repos/virbula/offlinemaps/releases/'
           '24680/assets{?name,label}',
       'draft': true,
+      'prerelease': false,
       'assets': const <Object?>[],
     }, expectedRepository: 'virbula/offlinemaps');
 
@@ -279,11 +335,37 @@ void main() {
     );
   });
 
+  test('publishes a routing draft without changing the latest release', () {
+    final release = GitHubRemoteRelease.fromJson(<String, Object?>{
+      'id': 24681,
+      'tag_name': 'routing-2026.08.1',
+      'target_commitish': 'a' * 40,
+      'upload_url':
+          'https://uploads.github.com/repos/virbula/offlinemaps/releases/'
+          '24681/assets{?name,label}',
+      'draft': true,
+      'prerelease': false,
+      'assets': const <Object?>[],
+    }, expectedRepository: 'virbula/offlinemaps');
+
+    expect(
+      gitHubReleasePublishArguments(
+        repository: 'virbula/offlinemaps',
+        release: release,
+        makeLatest: false,
+      ),
+      contains('make_latest=false'),
+    );
+  });
+
   test('rejects an upload URL outside the expected release identity', () {
     Map<String, Object?> response(String uploadUrl) => <String, Object?>{
       'id': 24680,
+      'tag_name': 'maps-2026.08.1',
+      'target_commitish': 'a' * 40,
       'upload_url': uploadUrl,
       'draft': true,
+      'prerelease': false,
       'assets': const <Object?>[],
     };
 
@@ -406,6 +488,47 @@ void main() {
     expect(plan.allAssets.last.name, 'catalog.json');
     expect(plan.describe(), contains('will be deleted or clobbered'));
     expect(plan.describe(), contains('PMTiles remain ignored'));
+  });
+
+  test('plans routing in a separate coordinated release', () {
+    final parsed = options();
+    final map = GitHubPublishAsset(
+      localFile: File('${temporary.path}/map.pmtiles'),
+      name: 'zeta-road-2026.08.1.pmtiles',
+      publicUrl: parsed.releaseAssetUrl('zeta-road-2026.08.1.pmtiles'),
+      exactBytes: 10,
+      sha256: 'a' * 64,
+    );
+    final catalog = GitHubPublishAsset(
+      localFile: File('${temporary.path}/catalog.json'),
+      name: 'catalog.json',
+      publicUrl: parsed.releaseAssetUrl('catalog.json'),
+      exactBytes: 20,
+      sha256: 'b' * 64,
+    );
+    final routing = GitHubPublishAsset(
+      localFile: File('${temporary.path}/route.vtiles.tar'),
+      name: 'zeta-road-routing-2026.08.1.vtiles.tar',
+      publicUrl: parsed.releaseAssetUrlForTag(
+        'routing-2026.08.1',
+        'zeta-road-routing-2026.08.1.vtiles.tar',
+      ),
+      exactBytes: 30,
+      sha256: 'c' * 64,
+    );
+    final plan = GitHubPublishPlan.create(
+      options: parsed,
+      release: ValidatedGitHubReleaseBundle(
+        regionAssets: <GitHubPublishAsset>[map],
+        routingAssets: <GitHubPublishAsset>[routing],
+        metadataAssets: <GitHubPublishAsset>[catalog],
+      ),
+    );
+
+    expect(plan.routingTag, 'routing-2026.08.1');
+    expect(plan.routingAssets, <GitHubPublishAsset>[routing]);
+    expect(plan.allAssets, <GitHubPublishAsset>[map, catalog]);
+    expect(plan.describe(), contains('PUBLISH routing release first'));
   });
 
   test(

@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as path;
 
+import 'build_routing.dart';
 import 'build_shard.dart' show validateRecordStatic;
 import 'github_release_api.dart';
 import 'prepare_release.dart' show expectedRegionCount, validateDraftIdentity;
@@ -79,18 +80,41 @@ Future<void> finalizeRelease(FinalizeOptions options) async {
   final tag = string(release['releaseTag'], 'release.releaseTag');
   final target = string(release['targetCommitish'], 'release.targetCommitish');
   final expectedShards = integer(release['shardCount'], 'release.shardCount');
+  final routingReleaseId = integer(
+    release['routingReleaseId'] ?? 0,
+    'release.routingReleaseId',
+  );
+  final routingTag = optionalString(
+    release['routingReleaseTag'],
+    'release.routingReleaseTag',
+  );
+  final routingRegionCount = integer(
+    release['routingRegionCount'] ?? 0,
+    'release.routingRegionCount',
+  );
   if ((mode != 'update' && mode != 'resume-existing') ||
       releaseId <= 0 ||
       !tagPattern.hasMatch(tag) ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
       expectedShards < 1 ||
-      expectedShards > 256) {
+      expectedShards > 256 ||
+      routingRegionCount < 0 ||
+      (routingRegionCount == 0
+          ? routingReleaseId != 0 || routingTag != null
+          : routingReleaseId <= 0 ||
+                routingTag == null ||
+                !RegExp(r'^routing-\d{4}\.\d{2}\.\d+$').hasMatch(routingTag))) {
     throw const AutomationException('Finalizer release identity is invalid.');
   }
   final generatedRegions = <String, Map<String, Object?>>{
     for (final region in objectList(manifest['regions'], 'manifest.regions'))
       string(region['id'], 'region.id'): region,
   };
+  final routingBuilder = manifest['routingBuilder'] == null
+      ? null
+      : ValhallaRoutingBuilderConfiguration.fromJson(
+          manifest['routingBuilder'],
+        );
   if (generatedRegions.length != expectedRegionCount) {
     throw const AutomationException(
       'Manifest must contain exactly 554 regions.',
@@ -122,6 +146,7 @@ Future<void> finalizeRelease(FinalizeOptions options) async {
       generatedRegion: generatedRegions[entry.key]!,
       repository: repository,
       tag: tag,
+      routingEngineVersion: routingBuilder?.version,
     );
   }
   final github = GitHubReleaseClient(
@@ -135,6 +160,21 @@ Future<void> finalizeRelease(FinalizeOptions options) async {
       target: target,
     );
     await _validateRemoteMaps(github, releaseId: releaseId, records: records);
+    GitHubRelease? routingRelease;
+    if (routingRegionCount > 0) {
+      routingRelease = await github.releaseById(routingReleaseId);
+      _validateRoutingReleaseIdentity(
+        routingRelease,
+        tag: routingTag!,
+        target: target,
+      );
+      await _validateRemoteRouting(
+        github,
+        releaseId: routingReleaseId,
+        records: records,
+        expectedCount: routingRegionCount,
+      );
+    }
     await options.outputDirectory.create(recursive: true);
     final metadata = mode == 'resume-existing'
         ? await _validateAndCopyAuthoritativeMetadata(
@@ -190,6 +230,33 @@ Future<void> finalizeRelease(FinalizeOptions options) async {
       records: records,
       metadata: metadata,
     );
+    if (routingRelease != null && routingRelease.draft) {
+      _validateRoutingReleaseIdentity(
+        await github.releaseById(routingReleaseId),
+        tag: routingTag!,
+        target: target,
+      );
+      final publishedRouting = await github.publishNotLatest(routingReleaseId);
+      if (publishedRouting.id != routingReleaseId ||
+          publishedRouting.tagName != routingTag ||
+          publishedRouting.targetCommitish.toLowerCase() !=
+              target.toLowerCase() ||
+          publishedRouting.draft ||
+          publishedRouting.prerelease) {
+        throw const AutomationException(
+          'Routing release was not published safely.',
+        );
+      }
+    }
+    if (routingRegionCount > 0) {
+      await _verifyTaggedRoutingAssets(records: records);
+      await _validateRemoteRouting(
+        github,
+        releaseId: routingReleaseId,
+        records: records,
+        expectedCount: routingRegionCount,
+      );
+    }
     validateDraftIdentity(
       await github.releaseById(releaseId),
       tag: tag,
@@ -338,6 +405,87 @@ Future<Map<String, GitHubReleaseAsset>> _validateRemoteMaps(
   return Map.unmodifiable(maps);
 }
 
+void _validateRoutingReleaseIdentity(
+  GitHubRelease release, {
+  required String tag,
+  required String target,
+}) {
+  if (release.tagName != tag ||
+      release.targetCommitish.toLowerCase() != target.toLowerCase() ||
+      release.prerelease) {
+    throw const AutomationException('Routing release identity is invalid.');
+  }
+}
+
+Future<void> _validateRemoteRouting(
+  GitHubReleaseClient github, {
+  required int releaseId,
+  required Map<String, Map<String, Object?>> records,
+  required int expectedCount,
+}) async {
+  final descriptors = <Map<String, Object?>>[
+    for (final record in records.values)
+      if (record['routing'] != null)
+        object(record['routing'], '${record['id']}.routing'),
+  ];
+  if (descriptors.length != expectedCount) {
+    throw AutomationException(
+      'Reports contain ${descriptors.length} routing packs; expected '
+      '$expectedCount.',
+    );
+  }
+  final assets = await github.listAssets(releaseId);
+  final expectedNames = <String>{
+    for (final descriptor in descriptors)
+      string(descriptor['file'], 'routing.file'),
+  };
+  if (expectedNames.length != expectedCount ||
+      assets.length != expectedCount ||
+      assets.map((asset) => asset.name).toSet().length != expectedCount ||
+      assets.any((asset) => !expectedNames.contains(asset.name))) {
+    throw const AutomationException('Routing release asset set is not exact.');
+  }
+  for (final descriptor in descriptors) {
+    final name = string(descriptor['file'], 'routing.file');
+    final matches = assets.where((asset) => asset.name == name).toList();
+    if (matches.length != 1 ||
+        !assetMatches(
+          matches.single,
+          exactBytes: integer(descriptor['exactBytes'], '$name.exactBytes'),
+          sha256: string(descriptor['sha256'], '$name.sha256'),
+        ) ||
+        matches.single.label !=
+            routingAssetProvenanceLabel(
+              string(descriptor['sourceSha256'], '$name.sourceSha256'),
+            )) {
+      throw AutomationException('Remote routing pack $name is mismatched.');
+    }
+  }
+}
+
+Future<void> _verifyTaggedRoutingAssets({
+  required Map<String, Map<String, Object?>> records,
+}) async {
+  final tasks = <Future<void>>[];
+  for (final record in records.values) {
+    if (record['routing'] == null) continue;
+    final descriptor = object(record['routing'], '${record['id']}.routing');
+    tasks.add(
+      _retryPublicVerification(
+        url: httpsUri(descriptor['downloadUrl'], 'routing.downloadUrl'),
+        exactBytes: integer(descriptor['exactBytes'], 'routing.exactBytes'),
+        digest: string(descriptor['sha256'], 'routing.sha256'),
+        allowRange: true,
+      ),
+    );
+    if (tasks.length == 8) {
+      await Future.wait(tasks);
+      tasks.clear();
+    }
+  }
+  if (tasks.isNotEmpty) await Future.wait(tasks);
+}
+
 Future<Map<String, File>> _buildMetadata(
   Directory output, {
   required File manifestFile,
@@ -365,6 +513,9 @@ Future<Map<String, File>> _buildMetadata(
   await writeJson(generated, catalogValue);
   await writeJson(catalog, catalogValue);
   final builder = object(manifest['builder'], 'builder');
+  final routingBuilder = manifest['routingBuilder'] == null
+      ? null
+      : object(manifest['routingBuilder'], 'routingBuilder');
   final provenance = File(path.join(output.path, 'provenance.json'));
   await writeJson(provenance, <String, Object?>{
     'schemaVersion': 2,
@@ -378,6 +529,14 @@ Future<Map<String, File>> _buildMetadata(
       'executable': builder['executable'],
       'downloadThreads': builder['downloadThreads'],
     },
+    if (routingBuilder != null)
+      'routingBuilder': <String, Object?>{
+        'name': 'valhalla',
+        'version': routingBuilder['version'],
+        'image': routingBuilder['image'],
+        'dockerExecutable': routingBuilder['dockerExecutable'],
+        'buildConcurrency': routingBuilder['buildConcurrency'],
+      },
     'source': manifest['source'],
     'regions': [
       for (final record in ordered)
@@ -387,6 +546,25 @@ Future<Map<String, File>> _buildMetadata(
           'outputSha256': record['sha256'],
           'outputBytes': record['exactBytes'],
           'addressedTiles': record['tileCount'],
+          if (record['routing'] != null) ...<String, Object?>{
+            'routingFile': object(record['routing'], 'record.routing')['file'],
+            'routingOutputSha256': object(
+              record['routing'],
+              'record.routing',
+            )['sha256'],
+            'routingOutputBytes': object(
+              record['routing'],
+              'record.routing',
+            )['exactBytes'],
+            'routingSourceSha256': object(
+              record['routing'],
+              'record.routing',
+            )['sourceSha256'],
+            'routingSourceInput': object(
+              record['routing'],
+              'record.routing',
+            )['sourceInput'],
+          },
         },
     ],
   });
@@ -394,6 +572,15 @@ Future<Map<String, File>> _buildMetadata(
   await _writeChecksums(checksums, <String, String>{
     for (final record in ordered)
       string(record['file'], 'file'): string(record['sha256'], 'sha256'),
+    for (final record in ordered)
+      if (record['routing'] != null)
+        string(
+          object(record['routing'], 'record.routing')['file'],
+          'routing.file',
+        ): string(
+          object(record['routing'], 'record.routing')['sha256'],
+          'routing.sha256',
+        ),
     basename(generated): await fileSha256(generated),
     basename(catalog): await fileSha256(catalog),
     basename(provenance): await fileSha256(provenance),
@@ -455,6 +642,15 @@ Future<Map<String, File>> _validateAndCopyAuthoritativeMetadata(
   await _validateChecksums(result['SHA256SUMS']!, <String, String>{
     for (final record in records.values)
       string(record['file'], 'file'): string(record['sha256'], 'sha256'),
+    for (final record in records.values)
+      if (record['routing'] != null)
+        string(
+          object(record['routing'], 'record.routing')['file'],
+          'routing.file',
+        ): string(
+          object(record['routing'], 'record.routing')['sha256'],
+          'routing.sha256',
+        ),
     'catalog.json': await fileSha256(result['catalog.json']!),
     'offline-regions.generated.json': await fileSha256(
       result['offline-regions.generated.json']!,

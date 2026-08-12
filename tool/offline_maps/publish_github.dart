@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 import 'build_all.dart';
+import 'build_routing.dart';
 
 const _usage = r'''
 Validate and publish the generated EasyElevation PMTiles bundle as public
@@ -54,6 +55,9 @@ const List<Duration> _createdReleaseVisibilityBackoff = <Duration>[
 ];
 final RegExp _safePmtilesName = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,220}\.pmtiles$',
+);
+final RegExp _safeRoutingName = RegExp(
+  r'^[a-z0-9][a-z0-9._-]{0,210}\.vtiles\.tar$',
 );
 final RegExp _safeChecksumName = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,220}$');
 final RegExp _sha256Pattern = RegExp(r'^[a-f0-9]{64}$');
@@ -196,6 +200,12 @@ class GitHubPublishOptions {
     final target = targetValue == null || targetValue.isEmpty
         ? null
         : _validateTarget(targetValue);
+    if (resumeDraft && target == null) {
+      throw const GitHubPublishException(
+        '--resume-draft requires --target so an existing release is bound to '
+        'the reviewed branch or full commit SHA.',
+      );
+    }
     return GitHubPublishOptions(
       manifestFile: manifest,
       manifest: parsedManifest,
@@ -229,6 +239,18 @@ class GitHubPublishOptions {
       'releases',
       'download',
       tag,
+      assetName,
+    ],
+  );
+
+  Uri releaseAssetUrlForTag(String releaseTag, String assetName) => Uri(
+    scheme: 'https',
+    host: 'github.com',
+    pathSegments: <String>[
+      ...repository.split('/'),
+      'releases',
+      'download',
+      releaseTag,
       assetName,
     ],
   );
@@ -276,6 +298,7 @@ class GitHubPublishAsset {
     required this.publicUrl,
     required this.exactBytes,
     required this.sha256,
+    this.label,
   });
 
   final File localFile;
@@ -283,15 +306,18 @@ class GitHubPublishAsset {
   final Uri publicUrl;
   final int exactBytes;
   final String sha256;
+  final String? label;
 }
 
 class ValidatedGitHubReleaseBundle {
   const ValidatedGitHubReleaseBundle({
     required this.regionAssets,
+    required this.routingAssets,
     required this.metadataAssets,
   });
 
   final List<GitHubPublishAsset> regionAssets;
+  final List<GitHubPublishAsset> routingAssets;
   final List<GitHubPublishAsset> metadataAssets;
 
   List<GitHubPublishAsset> get allAssets =>
@@ -362,7 +388,9 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
   }
 
   final regionAssets = <GitHubPublishAsset>[];
+  final routingAssets = <GitHubPublishAsset>[];
   final expectedPmtilesNames = <String>{};
+  final expectedRoutingNames = <String>{};
   for (final region in manifest.enabledRegions) {
     final entry = regionsById[region.id];
     if (entry == null) {
@@ -405,6 +433,162 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
         sha256: expectedSha,
       ),
     );
+    final routing = entry['routing'];
+    if (routing == null) {
+      if (region.routing != null) {
+        throw GitHubPublishException(
+          '${region.id} is missing its planned routing descriptor.',
+        );
+      }
+      _expectEqual(
+        entry['routingAvailable'],
+        false,
+        '${region.id}.routingAvailable',
+      );
+      _expectEqual(
+        entry['combinedExactBytes'],
+        exactBytes,
+        '${region.id}.combinedExactBytes',
+      );
+    } else {
+      _expectEqual(
+        entry['routingAvailable'],
+        true,
+        '${region.id}.routingAvailable',
+      );
+      final descriptor = _object(routing, '${region.id}.routing');
+      final planned = region.routing;
+      if (planned == null) {
+        throw GitHubPublishException(
+          '${region.id} catalog has unplanned routing data.',
+        );
+      }
+      _expectEqual(
+        descriptor['format'],
+        'valhalla-tar',
+        '${region.id}.routing.format',
+      );
+      _expectEqual(
+        descriptor['engine'],
+        routingEngine,
+        '${region.id}.routing.engine',
+      );
+      _expectEqual(
+        descriptor['engineVersion'],
+        manifest.routingBuilder?.version,
+        '${region.id}.routing.engineVersion',
+      );
+      _expectEqual(
+        descriptor['version'],
+        planned.version,
+        '${region.id}.routing.version',
+      );
+      _expectEqual(
+        descriptor['updatedAt'],
+        planned.updatedAt.toIso8601String(),
+        '${region.id}.routing.updatedAt',
+      );
+      _expectJsonEqual(
+        descriptor['modes'],
+        supportedRoutingModes,
+        '${region.id}.routing.modes',
+      );
+      _expectEqual(
+        descriptor['attribution'],
+        routingDataAttribution,
+        '${region.id}.routing.attribution',
+      );
+      _expectEqual(
+        descriptor['attributionUrl'],
+        routingDataAttributionUrl,
+        '${region.id}.routing.attributionUrl',
+      );
+      _expectEqual(
+        descriptor['license'],
+        routingDataLicense,
+        '${region.id}.routing.license',
+      );
+      _expectEqual(
+        descriptor['licenseUrl'],
+        routingDataLicenseUrl,
+        '${region.id}.routing.licenseUrl',
+      );
+      _expectEqual(
+        descriptor['sourceProvider'],
+        routingDataSource,
+        '${region.id}.routing.sourceProvider',
+      );
+      _expectEqual(
+        descriptor['sourceUrl'],
+        routingDataSourceUrl,
+        '${region.id}.routing.sourceUrl',
+      );
+      final routingName = _requiredString(
+        descriptor['file'],
+        '${region.id}.routing.file',
+      );
+      if (routingName != planned.file ||
+          !_safeRoutingName.hasMatch(routingName) ||
+          !expectedRoutingNames.add(routingName)) {
+        throw GitHubPublishException(
+          '${region.id} has an unsafe, duplicate, or unplanned routing file.',
+        );
+      }
+      final routingUrl = options.releaseAssetUrlForTag(
+        planned.releaseTag,
+        routingName,
+      );
+      _expectEqual(
+        descriptor['downloadUrl'],
+        routingUrl.toString(),
+        '${region.id}.routing.downloadUrl',
+      );
+      final routingBytes = _requiredInt(
+        descriptor['exactBytes'],
+        '${region.id}.routing.exactBytes',
+      );
+      if (routingBytes <= 0 || routingBytes > maximumRoutingAssetBytes) {
+        throw GitHubPublishException(
+          '${region.id} routing bytes exceed the GitHub asset limit.',
+        );
+      }
+      _expectEqual(
+        entry['combinedExactBytes'],
+        exactBytes + routingBytes,
+        '${region.id}.combinedExactBytes',
+      );
+      final routingSha = _requiredSha(
+        descriptor['sha256'],
+        '${region.id}.routing.sha256',
+      );
+      final routingSourceSha = _requiredSha(
+        descriptor['sourceSha256'],
+        '${region.id}.routing.sourceSha256',
+      );
+      _expectJsonEqual(
+        descriptor['sourceInput'],
+        planned.source.toJson(),
+        '${region.id}.routing.sourceInput',
+      );
+      final routingFile = File(path.join(input.path, routingName));
+      await _requireRegularFile(routingFile, description: routingName);
+      if (await routingFile.length() != routingBytes ||
+          await _fileSha256(routingFile) != routingSha) {
+        throw GitHubPublishException(
+          '$routingName does not match its catalog size/SHA-256.',
+        );
+      }
+      routingAssets.add(
+        GitHubPublishAsset(
+          localFile: routingFile,
+          name: routingName,
+          publicUrl: routingUrl,
+          exactBytes: routingBytes,
+          sha256: routingSha,
+          label: routingAssetProvenanceLabel(routingSourceSha),
+        ),
+      );
+    }
   }
   if (regionsById.keys
       .toSet()
@@ -430,6 +614,20 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
       '${names.join(', ')}.',
     );
   }
+  final localRoutingNames = <String>{};
+  await for (final entity in input.list(followLinks: false)) {
+    if (entity is File && entity.path.toLowerCase().endsWith('.vtiles.tar')) {
+      localRoutingNames.add(path.basename(entity.path));
+    }
+  }
+  final unexpectedRouting = localRoutingNames.difference(expectedRoutingNames);
+  if (unexpectedRouting.isNotEmpty) {
+    final names = unexpectedRouting.toList()..sort();
+    throw GitHubPublishException(
+      'Release directory contains stale/unplanned routing file(s): '
+      '${names.join(', ')}.',
+    );
+  }
 
   await _validateProvenance(
     file: provenanceFile,
@@ -440,6 +638,7 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
 
   final hashedFiles = <String, File>{
     for (final asset in regionAssets) asset.name: asset.localFile,
+    for (final asset in routingAssets) asset.name: asset.localFile,
     'catalog.json': catalogFile,
     'offline-regions.generated.json': generatedFile,
     'provenance.json': provenanceFile,
@@ -466,9 +665,11 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
     );
   }
   regionAssets.sort((left, right) => left.name.compareTo(right.name));
+  routingAssets.sort((left, right) => left.name.compareTo(right.name));
   metadataAssets.sort((left, right) => left.name.compareTo(right.name));
   return ValidatedGitHubReleaseBundle(
     regionAssets: List.unmodifiable(regionAssets),
+    routingAssets: List.unmodifiable(routingAssets),
     metadataAssets: List.unmodifiable(metadataAssets),
   );
 }
@@ -616,6 +817,37 @@ Future<void> _validateProvenance({
     manifest.builder.downloadThreads,
     'provenance.builder.downloadThreads',
   );
+  if (manifest.routingBuilder case final routingBuilder?) {
+    final actual = _object(
+      value['routingBuilder'],
+      'provenance.routingBuilder',
+    );
+    _expectEqual(actual['name'], 'valhalla', 'provenance.routingBuilder.name');
+    _expectEqual(
+      actual['version'],
+      routingBuilder.version,
+      'provenance.routingBuilder.version',
+    );
+    _expectEqual(
+      actual['image'],
+      routingBuilder.image,
+      'provenance.routingBuilder.image',
+    );
+    _expectEqual(
+      actual['dockerExecutable'],
+      routingBuilder.dockerExecutable,
+      'provenance.routingBuilder.dockerExecutable',
+    );
+    _expectEqual(
+      actual['buildConcurrency'],
+      routingBuilder.buildConcurrency,
+      'provenance.routingBuilder.buildConcurrency',
+    );
+  } else if (value.containsKey('routingBuilder')) {
+    throw const GitHubPublishException(
+      'provenance contains an unplanned routing builder.',
+    );
+  }
 
   final records = _objectList(value['regions'], 'provenance.regions');
   final seen = <String>{};
@@ -643,6 +875,45 @@ Future<void> _validateProvenance({
       catalog['tileCount'],
       'provenance.$id.addressedTiles',
     );
+    final routing = catalog['routing'];
+    if (routing == null) {
+      if (record.containsKey('routingFile') ||
+          record.containsKey('routingOutputSha256') ||
+          record.containsKey('routingOutputBytes') ||
+          record.containsKey('routingSourceSha256') ||
+          record.containsKey('routingSourceInput')) {
+        throw GitHubPublishException(
+          'provenance.$id contains unplanned routing output.',
+        );
+      }
+    } else {
+      final descriptor = _object(routing, '$id.routing');
+      _expectEqual(
+        record['routingFile'],
+        descriptor['file'],
+        'provenance.$id.routingFile',
+      );
+      _expectEqual(
+        record['routingOutputSha256'],
+        descriptor['sha256'],
+        'provenance.$id.routingOutputSha256',
+      );
+      _expectEqual(
+        record['routingOutputBytes'],
+        descriptor['exactBytes'],
+        'provenance.$id.routingOutputBytes',
+      );
+      _expectEqual(
+        record['routingSourceSha256'],
+        descriptor['sourceSha256'],
+        'provenance.$id.routingSourceSha256',
+      );
+      _expectJsonEqual(
+        record['routingSourceInput'],
+        descriptor['sourceInput'],
+        'provenance.$id.routingSourceInput',
+      );
+    }
   }
   if (seen.length != catalogRegions.length) {
     throw const GitHubPublishException(
@@ -682,8 +953,8 @@ Future<void> _validateChecksumManifest(
           .difference(checksums.keys.toSet())
           .isNotEmpty) {
     throw const GitHubPublishException(
-      'SHA256SUMS must list exactly every PMTiles archive plus catalog.json, '
-      'offline-regions.generated.json, and provenance.json.',
+      'SHA256SUMS must list exactly every PMTiles/routing archive plus '
+      'catalog.json, offline-regions.generated.json, and provenance.json.',
     );
   }
   for (final entry in expectedFiles.entries) {
@@ -778,6 +1049,8 @@ Future<String> _fileSha256(File file) async =>
 class GitHubPublishPlan {
   const GitHubPublishPlan({
     required this.regionAssets,
+    required this.routingAssets,
+    required this.routingTag,
     required this.metadataAssets,
     required this.taggedCatalogUrl,
     required this.stableCatalogUrl,
@@ -791,6 +1064,13 @@ class GitHubPublishPlan {
       throw GitHubPublishException(
         'The release contains ${release.allAssets.length} assets; GitHub '
         'Releases currently allow at most $_maximumGitHubReleaseAssets.',
+      );
+    }
+    if (release.routingAssets.length > _maximumGitHubReleaseAssets) {
+      throw GitHubPublishException(
+        'The routing release contains ${release.routingAssets.length} assets; '
+        'GitHub Releases currently allow at most '
+        '$_maximumGitHubReleaseAssets.',
       );
     }
     final names = <String>{};
@@ -807,8 +1087,30 @@ class GitHubPublishPlan {
         );
       }
     }
+    String? routingTag;
+    for (final asset in release.routingAssets) {
+      final segments = asset.publicUrl.pathSegments;
+      if (segments.length < 6 ||
+          segments[2] != 'releases' ||
+          segments[3] != 'download' ||
+          segments.last != asset.name) {
+        throw GitHubPublishException(
+          '${asset.name} has an invalid routing release URL.',
+        );
+      }
+      final tag = segments[4];
+      if (!RegExp(r'^routing-\d{4}\.\d{2}\.\d+$').hasMatch(tag) ||
+          (routingTag != null && routingTag != tag)) {
+        throw const GitHubPublishException(
+          'All routing packs must share one immutable routing release tag.',
+        );
+      }
+      routingTag = tag;
+    }
     return GitHubPublishPlan(
       regionAssets: release.regionAssets,
+      routingAssets: release.routingAssets,
+      routingTag: routingTag,
       metadataAssets: release.metadataAssets,
       taggedCatalogUrl: options.releaseAssetUrl('catalog.json'),
       stableCatalogUrl: options.stableCatalogUrl,
@@ -816,6 +1118,8 @@ class GitHubPublishPlan {
   }
 
   final List<GitHubPublishAsset> regionAssets;
+  final List<GitHubPublishAsset> routingAssets;
+  final String? routingTag;
   final List<GitHubPublishAsset> metadataAssets;
   final Uri taggedCatalogUrl;
   final Uri stableCatalogUrl;
@@ -831,6 +1135,17 @@ class GitHubPublishPlan {
       'REPOSITORY ${stableCatalogUrl.pathSegments.take(2).join('/')}',
     );
     buffer.writeln('CREATE DRAFT release');
+    if (routingAssets.isNotEmpty) {
+      buffer.writeln('CREATE DRAFT routing release $routingTag');
+      for (final asset in routingAssets) {
+        buffer.writeln(
+          'UPLOAD ${asset.name} (${asset.exactBytes} bytes, '
+          'sha256 ${asset.sha256})',
+        );
+        buffer.writeln('PUBLIC URL ${asset.publicUrl}');
+      }
+      buffer.writeln('PUBLISH routing release first with make_latest=false');
+    }
     for (final asset in allAssets) {
       buffer.writeln(
         'UPLOAD ${asset.name} (${asset.exactBytes} bytes, '
@@ -873,6 +1188,13 @@ Future<void> publishGitHubRelease({
   required GitHubPublishPlan plan,
 }) async {
   await _requireGitHubCli(options);
+  if (plan.routingAssets.isNotEmpty) {
+    await _publishRoutingRelease(
+      options: options,
+      tag: plan.routingTag!,
+      assets: plan.routingAssets,
+    );
+  }
   final assets = plan.allAssets;
 
   var createdDraft = false;
@@ -891,13 +1213,24 @@ Future<void> publishGitHubRelease({
           );
         },
       );
-      if (remote == null || !remote.isDraft) {
+      if (remote == null) {
         throw GitHubPublishException(
           'GitHub did not return the newly created draft for ${options.tag} '
           'after bounded visibility retries.',
         );
       }
+      _validateRemoteReleaseIdentity(
+        remote,
+        expectedTag: options.tag,
+        expectedTarget: options.target,
+        expectedDraft: true,
+      );
     } else {
+      _validateRemoteReleaseIdentity(
+        remote,
+        expectedTag: options.tag,
+        expectedTarget: options.target,
+      );
       if (!options.resumeDraft) {
         throw GitHubPublishException(
           'Release ${options.tag} already exists. Use a new tag, or pass '
@@ -931,6 +1264,12 @@ Future<void> publishGitHubRelease({
       assets,
       expectedReleaseId: remote.id,
     );
+    _validateRemoteReleaseIdentity(
+      confirmedDraft,
+      expectedTag: options.tag,
+      expectedTarget: remote.targetCommitish,
+      expectedDraft: true,
+    );
     stdout.writeln('Publishing ${options.tag} as the latest release...');
     await _runGhOrThrow(
       gitHubReleasePublishArguments(
@@ -942,13 +1281,17 @@ Future<void> publishGitHubRelease({
     publishedRelease = true;
 
     final published = await _getRelease(options);
-    if (published == null ||
-        published.id != confirmedDraft.id ||
-        published.isDraft) {
+    if (published == null || published.id != confirmedDraft.id) {
       throw GitHubPublishException(
         'Release ${options.tag} was not confirmed as public.',
       );
     }
+    _validateRemoteReleaseIdentity(
+      published,
+      expectedTag: options.tag,
+      expectedTarget: confirmedDraft.targetCommitish,
+      expectedDraft: false,
+    );
     for (final asset in plan.regionAssets) {
       await _verifyPublicRange(asset);
     }
@@ -987,6 +1330,132 @@ Future<void> publishGitHubRelease({
     'Published ${plan.regionAssets.length} free road-map pack(s). Catalog: '
     '${plan.stableCatalogUrl}',
   );
+}
+
+Future<void> _publishRoutingRelease({
+  required GitHubPublishOptions options,
+  required String tag,
+  required List<GitHubPublishAsset> assets,
+}) async {
+  final routingOptions = GitHubPublishOptions(
+    manifestFile: options.manifestFile,
+    manifest: options.manifest,
+    inputDirectory: options.inputDirectory,
+    repository: options.repository,
+    tag: tag,
+    releaseTitle: 'EasyElevation offline routing $tag',
+    target: options.target,
+    resumeDraft: options.resumeDraft,
+    dryRun: false,
+    showHelp: false,
+  );
+  var createdDraft = false;
+  var published = false;
+  try {
+    var remote = await _getRelease(routingOptions);
+    if (remote == null) {
+      await _createDraftRelease(routingOptions);
+      createdDraft = true;
+      remote = await retryGitHubLookupAfterCreate<GitHubRemoteRelease>(
+        lookup: () => _getRelease(routingOptions),
+      );
+      if (remote == null) {
+        throw GitHubPublishException(
+          'GitHub did not return the newly created routing draft $tag.',
+        );
+      }
+      _validateRemoteReleaseIdentity(
+        remote,
+        expectedTag: tag,
+        expectedTarget: options.target,
+        expectedDraft: true,
+      );
+    } else {
+      _validateRemoteReleaseIdentity(
+        remote,
+        expectedTag: tag,
+        expectedTarget: options.target,
+      );
+    }
+    if (!remote.isDraft) {
+      if (!options.resumeDraft) {
+        throw GitHubPublishException(
+          'Routing release $tag already exists. Use a new tag or '
+          '--resume-draft for an interrupted matching publication.',
+        );
+      }
+      _validateExistingDraftAssets(remote, assets);
+      if (remote.assets.length != assets.length) {
+        throw GitHubPublishException(
+          'Public routing release $tag does not have the exact asset set.',
+        );
+      }
+      for (final asset in assets) {
+        await _verifyPublicRange(asset);
+      }
+      stdout.writeln('Keeping verified public routing release $tag.');
+      return;
+    } else if (!createdDraft && !options.resumeDraft) {
+      throw GitHubPublishException(
+        'Routing draft $tag already exists; use --resume-draft only after '
+        'inspecting it.',
+      );
+    }
+    _validateExistingDraftAssets(remote, assets);
+    for (final asset in assets) {
+      if (remote.assets.containsKey(asset.name)) {
+        stdout.writeln('Keeping verified routing asset ${asset.name}.');
+        continue;
+      }
+      stdout.writeln('Uploading routing asset ${asset.name}...');
+      await _runGhOrThrow(
+        gitHubReleaseAssetUploadArguments(release: remote, asset: asset),
+        failure: 'Could not upload ${asset.name}',
+      );
+    }
+    final confirmed = await _waitForMatchingRemoteAssets(
+      routingOptions,
+      assets,
+      expectedReleaseId: remote.id,
+    );
+    _validateRemoteReleaseIdentity(
+      confirmed,
+      expectedTag: tag,
+      expectedTarget: remote.targetCommitish,
+      expectedDraft: true,
+    );
+    await _runGhOrThrow(
+      gitHubReleasePublishArguments(
+        repository: options.repository,
+        release: confirmed,
+        makeLatest: false,
+      ),
+      failure: 'Could not publish routing release $tag',
+    );
+    published = true;
+    final public = await _getRelease(routingOptions);
+    if (public == null || public.id != confirmed.id) {
+      throw GitHubPublishException(
+        'Routing release $tag was not confirmed as public.',
+      );
+    }
+    _validateRemoteReleaseIdentity(
+      public,
+      expectedTag: tag,
+      expectedTarget: confirmed.targetCommitish,
+      expectedDraft: false,
+    );
+    for (final asset in assets) {
+      await _verifyPublicRange(asset);
+    }
+  } on GitHubPublishException {
+    if (createdDraft && !published) {
+      stderr.writeln(
+        'Incomplete routing draft $tag was retained for safe resume.',
+      );
+    }
+    rethrow;
+  }
 }
 
 Future<void> _requireGitHubCli(GitHubPublishOptions options) async {
@@ -1032,7 +1501,9 @@ Future<void> _createDraftRelease(GitHubPublishOptions options) async {
     '--title',
     options.releaseTitle,
     '--notes',
-    'Free prebuilt road-map downloads for EasyElevation offline use.',
+    options.tag.startsWith('routing-')
+        ? routingReleaseBody
+        : 'Free prebuilt road-map downloads for EasyElevation offline use.',
     if (options.target != null) ...<String>['--target', options.target!],
   ], failure: 'Could not create draft release ${options.tag}');
 }
@@ -1106,7 +1577,7 @@ List<String> gitHubReleaseAssetUploadArguments({
   required GitHubPublishAsset asset,
 }) => <String>[
   'api',
-  release.assetUploadUrl(asset.name).toString(),
+  release.assetUploadUrl(asset.name, label: asset.label).toString(),
   '--method',
   'POST',
   '--header',
@@ -1123,6 +1594,7 @@ List<String> gitHubReleaseAssetUploadArguments({
 List<String> gitHubReleasePublishArguments({
   required String repository,
   required GitHubRemoteRelease release,
+  bool makeLatest = true,
 }) => <String>[
   'api',
   'repos/${_validateRepository(repository)}/releases/${release.id}',
@@ -1131,7 +1603,7 @@ List<String> gitHubReleasePublishArguments({
   '--field',
   'draft=false',
   '--raw-field',
-  'make_latest=true',
+  'make_latest=${makeLatest ? 'true' : 'false'}',
   '--silent',
 ];
 
@@ -1205,6 +1677,25 @@ Future<T?> retryGitHubLookupAfterCreate<T>({
 
 Future<void> _delay(Duration duration) => Future<void>.delayed(duration);
 
+void _validateRemoteReleaseIdentity(
+  GitHubRemoteRelease release, {
+  required String expectedTag,
+  required String? expectedTarget,
+  bool? expectedDraft,
+}) {
+  if (release.tagName != expectedTag ||
+      release.isPrerelease ||
+      (expectedTarget != null &&
+          release.targetCommitish.toLowerCase() !=
+              expectedTarget.toLowerCase()) ||
+      (expectedDraft != null && release.isDraft != expectedDraft)) {
+    throw GitHubPublishException(
+      'GitHub release identity/state does not match $expectedTag'
+      '${expectedTarget == null ? '' : ' at $expectedTarget'}.',
+    );
+  }
+}
+
 void _validateExistingDraftAssets(
   GitHubRemoteRelease release,
   List<GitHubPublishAsset> planned,
@@ -1277,7 +1768,8 @@ void _validateRemoteAsset(
 ) {
   final expectedDigest = 'sha256:${expected.sha256}'.toLowerCase();
   if (existing.exactBytes != expected.exactBytes ||
-      existing.digest?.toLowerCase() != expectedDigest) {
+      existing.digest?.toLowerCase() != expectedDigest ||
+      (expected.label != null && existing.label != expected.label)) {
     throw GitHubPublishException(
       'Existing ${expected.name} has size ${existing.exactBytes} and digest '
       '${existing.digest ?? 'unavailable'}; expected ${expected.exactBytes} '
@@ -1442,8 +1934,11 @@ Map<String, Object?> _decodeObject(String source, String description) {
 class GitHubRemoteRelease {
   const GitHubRemoteRelease({
     required this.id,
+    required this.tagName,
+    required this.targetCommitish,
     required this.uploadUrl,
     required this.isDraft,
+    required this.isPrerelease,
     required this.assets,
   });
 
@@ -1452,15 +1947,22 @@ class GitHubRemoteRelease {
     required String expectedRepository,
   }) {
     final id = value['id'];
+    final tagName = value['tag_name'];
+    final targetCommitish = value['target_commitish'];
     final uploadUrlValue = value['upload_url'];
     if (id is! int ||
         id <= 0 ||
+        tagName is! String ||
+        tagName.isEmpty ||
+        targetCommitish is! String ||
+        targetCommitish.isEmpty ||
         uploadUrlValue is! String ||
         value['draft'] is! bool ||
+        value['prerelease'] is! bool ||
         value['assets'] is! List<Object?>) {
       throw const GitHubPublishException(
-        'GitHub release response is missing valid id, upload_url, draft, or '
-        'assets fields.',
+        'GitHub release response is missing valid identity, state, upload_url, '
+        'or assets fields.',
       );
     }
     const template = '{?name,label}';
@@ -1504,11 +2006,13 @@ class GitHubRemoteRelease {
       final name = item['name'];
       final size = item['size'];
       final digest = item['digest'];
+      final label = item['label'];
       if (name is! String ||
           name.isEmpty ||
           size is! int ||
           size < 0 ||
-          (digest != null && digest is! String)) {
+          (digest != null && digest is! String) ||
+          (label != null && label is! String)) {
         throw const GitHubPublishException(
           'GitHub release response contains invalid asset metadata.',
         );
@@ -1521,30 +2025,43 @@ class GitHubRemoteRelease {
       assets[name] = GitHubRemoteAsset(
         exactBytes: size,
         digest: digest as String?,
+        label: label as String?,
       );
     }
     return GitHubRemoteRelease(
       id: id,
+      tagName: tagName,
+      targetCommitish: targetCommitish,
       uploadUrl: uploadUrl,
       isDraft: value['draft']! as bool,
+      isPrerelease: value['prerelease']! as bool,
       assets: Map.unmodifiable(assets),
     );
   }
 
   final int id;
+  final String tagName;
+  final String targetCommitish;
   final Uri uploadUrl;
   final bool isDraft;
+  final bool isPrerelease;
   final Map<String, GitHubRemoteAsset> assets;
 
-  Uri assetUploadUrl(String name) =>
-      uploadUrl.replace(queryParameters: <String, String>{'name': name});
+  Uri assetUploadUrl(String name, {String? label}) => uploadUrl.replace(
+    queryParameters: <String, String>{'name': name, 'label': ?label},
+  );
 }
 
 class GitHubRemoteAsset {
-  const GitHubRemoteAsset({required this.exactBytes, required this.digest});
+  const GitHubRemoteAsset({
+    required this.exactBytes,
+    required this.digest,
+    required this.label,
+  });
 
   final int exactBytes;
   final String? digest;
+  final String? label;
 }
 
 String _validateRepository(String value) {

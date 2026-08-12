@@ -1,10 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 import 'generate_worldwide_regions.dart';
+import 'discover_routing_sources.dart';
+import 'build_routing.dart';
 import 'github_release_api.dart';
+import 'recover_latest.dart'
+    show mapVersionForRecoveryTag, validateRecoveryMapDescriptor;
 import 'release_model.dart';
 
 const int expectedRegionCount = 554;
@@ -131,6 +136,15 @@ Future<void> prepareRelease(PrepareOptions options) async {
   final prepared = resume
       ? <String, Object?>{
           ...base,
+          if (base['routingDataset'] != null)
+            'routingDataset': <String, Object?>{
+              ...object(base['routingDataset'], 'routingDataset'),
+              // The retained first map release predates routing packs. Resume
+              // must never introduce new assets into that authoritative set.
+              'enabled': false,
+              'required': false,
+              'sources': <String, Object?>{},
+            },
           'builder': <String, Object?>{
             ...object(base['builder'], 'builder'),
             'executable': options.pmtilesCommand,
@@ -151,8 +165,25 @@ Future<void> prepareRelease(PrepareOptions options) async {
             'sourceId': 'protomaps-${selected.key.substring(0, 8)}',
           },
         };
+  final discoveredConfig = File(
+    path.join(options.outputDirectory.path, 'source.discovered.json'),
+  );
+  await writeJson(discoveredConfig, prepared);
   final config = File(path.join(options.outputDirectory.path, 'source.json'));
-  await writeJson(config, prepared);
+  final routingDataset = prepared['routingDataset'] == null
+      ? null
+      : object(prepared['routingDataset'], 'routingDataset');
+  if (!resume && routingDataset?['enabled'] == true) {
+    await discoverRoutingSources(
+      manifestFile: discoveredConfig,
+      outputManifest: config,
+      cacheDirectory: Directory(
+        path.join(options.cacheDirectory.path, 'routing-sources'),
+      ),
+    );
+  } else {
+    await discoveredConfig.copy(config.path);
+  }
   final manifest = File(
     path.join(options.outputDirectory.path, 'manifest.json'),
   );
@@ -169,6 +200,25 @@ Future<void> prepareRelease(PrepareOptions options) async {
       'Expected $expectedRegionCount regions, generated ${regions.length}.',
     );
   }
+  final routingRegions = regions
+      .where((region) => region['routingBuild'] != null)
+      .toList(growable: false);
+  final routingTags = <String>{
+    for (final region in routingRegions)
+      string(
+        object(
+          region['routingBuild'],
+          '${region['id']}.routingBuild',
+        )['releaseTag'],
+        '${region['id']}.routingBuild.releaseTag',
+      ),
+  };
+  if (routingTags.length > 1) {
+    throw const AutomationException(
+      'All routing-enabled regions must share one routing release tag.',
+    );
+  }
+  final routingTag = routingTags.isEmpty ? null : routingTags.single;
   final priorSizes = options.resumeCatalog.existsSync()
       ? await catalogSizes(options.resumeCatalog)
       : const <String, int>{};
@@ -213,6 +263,7 @@ Future<void> prepareRelease(PrepareOptions options) async {
     );
   }
   int releaseId = 0;
+  int routingReleaseId = 0;
   var noOp = false;
   if (!options.dryRun) {
     final github = GitHubReleaseClient(
@@ -248,6 +299,28 @@ Future<void> prepareRelease(PrepareOptions options) async {
         validateDraftIdentity(release, tag: tag, target: options.target);
       }
       releaseId = release.id;
+      if (!noOp && routingTag != null) {
+        var routingRelease = await github.releaseByTag(routingTag);
+        if (routingRelease == null) {
+          if (options.mode == 'resume-existing') {
+            throw AutomationException(
+              'Routing draft $routingTag does not exist for resume.',
+            );
+          }
+          routingRelease = await github.createDraft(
+            tag: routingTag,
+            target: options.target,
+            title: 'EasyElevation offline routing $routingTag',
+            body: routingReleaseBody,
+          );
+        }
+        validateDraftIdentity(
+          routingRelease,
+          tag: routingTag,
+          target: options.target,
+        );
+        routingReleaseId = routingRelease.id;
+      }
     } finally {
       github.close();
     }
@@ -259,6 +332,9 @@ Future<void> prepareRelease(PrepareOptions options) async {
       'repository': options.repository,
       'releaseId': releaseId,
       'releaseTag': tag,
+      'routingReleaseTag': ?routingTag,
+      'routingReleaseId': routingReleaseId,
+      'routingRegionCount': routingRegions.length,
       'targetCommitish': options.target,
       'generatedAt': generatedAt.toIso8601String(),
       'source': selected.toJson(),
@@ -282,34 +358,268 @@ Future<bool> _publicReleaseMatchesSource(
   final assets = await github.listAssets(release.id);
   if (assets.length != 558 ||
       assets.map((asset) => asset.name).toSet().length != 558 ||
-      assets.where((asset) => asset.name == 'provenance.json').length != 1) {
+      release.draft ||
+      release.prerelease) {
     return false;
   }
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
   try {
-    final request = await client.getUrl(
-      Uri.https(
-        'github.com',
-        '/$repository/releases/download/${release.tagName}/provenance.json',
-      ),
-    );
-    request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-    request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
-    final response = await request.close();
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain<void>();
-      return false;
+    final metadataBytes = <String, List<int>>{};
+    for (final name in const <String>[
+      'catalog.json',
+      'offline-regions.generated.json',
+      'provenance.json',
+      'SHA256SUMS',
+    ]) {
+      metadataBytes[name] = await _downloadPublicBytes(
+        client,
+        Uri.https(
+          'github.com',
+          '/$repository/releases/download/${release.tagName}/$name',
+        ),
+      );
+      final matches = assets
+          .where((asset) => asset.name == name)
+          .toList(growable: false);
+      final bytes = metadataBytes[name]!;
+      if (matches.length != 1 ||
+          !assetMatches(
+            matches.single,
+            exactBytes: bytes.length,
+            sha256: sha256.convert(bytes).toString(),
+          )) {
+        return false;
+      }
     }
     final provenance = object(
-      jsonDecode(await _readBoundedResponse(response, 5 * 1024 * 1024)),
+      jsonDecode(utf8.decode(metadataBytes['provenance.json']!)),
       'provenance',
     );
-    return provenance['releaseTag'] == release.tagName &&
-        provenance['githubRepository'] == repository &&
-        deepJsonEquals(provenance['source'], source.toJson());
+    final catalog = object(
+      jsonDecode(utf8.decode(metadataBytes['catalog.json']!)),
+      'catalog',
+    );
+    final generated = object(
+      jsonDecode(utf8.decode(metadataBytes['offline-regions.generated.json']!)),
+      'generated catalog',
+    );
+    if (!deepJsonEquals(catalog, generated) ||
+        provenance['releaseTag'] != release.tagName ||
+        provenance['githubRepository'] != repository ||
+        !deepJsonEquals(provenance['source'], source.toJson()) ||
+        catalog['generatedAt'] != provenance['generatedAt'] ||
+        catalog['schemaVersion'] != 2 ||
+        catalog['archiveFormat'] != 'pmtiles' ||
+        catalog['tileType'] != 'mvt') {
+      return false;
+    }
+    final mapVersion = mapVersionForRecoveryTag(release.tagName);
+    final generatedAt = utcTimestamp(
+      catalog['generatedAt'],
+      'catalog.generatedAt',
+    );
+    final regions = objectList(catalog['regions'], 'catalog.regions');
+    final ids = <String>{};
+    final mapFiles = <String>{};
+    if (regions.length != expectedRegionCount) return false;
+    for (final region in regions) {
+      final id = string(region['id'], 'region.id');
+      final file = string(region['file'], '$id.file');
+      if (!ids.add(id) || !mapFiles.add(file)) return false;
+      validateRecoveryMapDescriptor(
+        region,
+        id: id,
+        repository: repository,
+        tag: release.tagName,
+        version: mapVersion,
+        generatedAt: generatedAt,
+      );
+      final matches = assets
+          .where((asset) => asset.name == file)
+          .toList(growable: false);
+      if (matches.length != 1 ||
+          !assetMatches(
+            matches.single,
+            exactBytes: integer(region['exactBytes'], '$id.exactBytes'),
+            sha256: string(region['sha256'], '$id.sha256'),
+          )) {
+        return false;
+      }
+    }
+    if (assets.any(
+      (asset) =>
+          !mapFiles.contains(asset.name) &&
+          !const <String>{
+            'catalog.json',
+            'offline-regions.generated.json',
+            'provenance.json',
+            'SHA256SUMS',
+          }.contains(asset.name),
+    )) {
+      return false;
+    }
+    final latest = await github.latestRelease();
+    if (latest == null ||
+        latest.id != release.id ||
+        latest.tagName != release.tagName ||
+        latest.targetCommitish.toLowerCase() !=
+            release.targetCommitish.toLowerCase() ||
+        latest.draft ||
+        latest.prerelease) {
+      return false;
+    }
+    final stableCatalog = await _downloadPublicBytes(
+      client,
+      Uri.https(
+        'github.com',
+        '/$repository/releases/latest/download/catalog.json',
+      ),
+    );
+    if (!deepJsonEquals(stableCatalog, metadataBytes['catalog.json'])) {
+      return false;
+    }
+    final routingBuilder = provenance['routingBuilder'] == null
+        ? null
+        : object(provenance['routingBuilder'], 'provenance.routingBuilder');
+    final routing = <String, Map<String, Object?>>{
+      for (final region in regions)
+        if (region['routing'] != null)
+          string(
+            object(region['routing'], 'region.routing')['file'],
+            'routing.file',
+          ): object(
+            region['routing'],
+            'region.routing',
+          ),
+    };
+    if (routing.isEmpty || routingBuilder == null) return false;
+    final engineVersion = string(
+      routingBuilder['version'],
+      'routingBuilder.version',
+    );
+    if (routingBuilder['name'] != routingEngine ||
+        !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(engineVersion)) {
+      return false;
+    }
+    final routingTags = <String>{};
+    for (final entry in routing.entries) {
+      final descriptor = entry.value;
+      final url = httpsUri(descriptor['downloadUrl'], 'routing.downloadUrl');
+      final segments = url.pathSegments;
+      if (descriptor['engine'] != routingEngine ||
+          descriptor['engineVersion'] != engineVersion ||
+          descriptor['format'] != 'valhalla-tar' ||
+          !routingAssetPattern.hasMatch(entry.key) ||
+          integer(descriptor['exactBytes'], '${entry.key}.exactBytes') <= 0 ||
+          !routingSha256Pattern.hasMatch(
+            string(descriptor['sha256'], '${entry.key}.sha256'),
+          ) ||
+          !routingSha256Pattern.hasMatch(
+            string(descriptor['sourceSha256'], '${entry.key}.sourceSha256'),
+          ) ||
+          !deepJsonEquals(descriptor['modes'], supportedRoutingModes) ||
+          descriptor['attribution'] != routingDataAttribution ||
+          descriptor['license'] != routingDataLicense ||
+          descriptor['version'] != mapVersion ||
+          descriptor['updatedAt'] != generatedAt.toIso8601String() ||
+          segments.length != 6 ||
+          '${segments[0]}/${segments[1]}' != repository ||
+          segments[2] != 'releases' ||
+          segments[3] != 'download' ||
+          segments[4] != 'routing-$mapVersion' ||
+          segments[5] != entry.key ||
+          url.host != 'github.com') {
+        return false;
+      }
+      routingTags.add(segments[4]);
+    }
+    if (routingTags.length != 1) return false;
+    final routingRelease = await github.releaseByTag(routingTags.single);
+    if (routingRelease == null ||
+        routingRelease.draft ||
+        routingRelease.prerelease ||
+        routingRelease.targetCommitish.toLowerCase() !=
+            release.targetCommitish.toLowerCase()) {
+      return false;
+    }
+    final routingAssets = await github.listAssets(routingRelease.id);
+    if (routingAssets.length != routing.length ||
+        routingAssets.map((asset) => asset.name).toSet().length !=
+            routing.length) {
+      return false;
+    }
+    for (final entry in routing.entries) {
+      final matches = routingAssets
+          .where((asset) => asset.name == entry.key)
+          .toList(growable: false);
+      final descriptor = entry.value;
+      if (matches.length != 1 ||
+          !assetMatches(
+            matches.single,
+            exactBytes: integer(
+              descriptor['exactBytes'],
+              '${entry.key}.exactBytes',
+            ),
+            sha256: string(descriptor['sha256'], '${entry.key}.sha256'),
+          ) ||
+          matches.single.label !=
+              routingAssetProvenanceLabel(
+                string(descriptor['sourceSha256'], '${entry.key}.sourceSha256'),
+              )) {
+        return false;
+      }
+    }
+    final parsedChecksums = <String, String>{};
+    for (final line
+        in utf8
+            .decode(metadataBytes['SHA256SUMS']!)
+            .split('\n')
+            .where((line) => line.isNotEmpty)) {
+      final match = RegExp(
+        r'^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$',
+      ).firstMatch(line);
+      if (match == null || parsedChecksums.containsKey(match.group(2))) {
+        return false;
+      }
+      parsedChecksums[match.group(2)!] = match.group(1)!;
+    }
+    final expectedChecksums = <String, String>{
+      for (final region in regions)
+        string(region['file'], 'region.file'): string(
+          region['sha256'],
+          'region.sha256',
+        ),
+      for (final entry in routing.entries)
+        entry.key: string(entry.value['sha256'], '${entry.key}.sha256'),
+      'catalog.json': sha256.convert(metadataBytes['catalog.json']!).toString(),
+      'offline-regions.generated.json': sha256
+          .convert(metadataBytes['offline-regions.generated.json']!)
+          .toString(),
+      'provenance.json': sha256
+          .convert(metadataBytes['provenance.json']!)
+          .toString(),
+    };
+    if (!deepJsonEquals(parsedChecksums, expectedChecksums)) return false;
+    return true;
+  } on AutomationException {
+    return false;
+  } on FormatException {
+    return false;
   } finally {
     client.close(force: true);
   }
+}
+
+Future<List<int>> _downloadPublicBytes(HttpClient client, Uri url) async {
+  final request = await client.getUrl(url);
+  request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+  request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+  final response = await request.close();
+  if (response.statusCode != HttpStatus.ok) {
+    await response.drain<void>();
+    throw AutomationException('$url returned HTTP ${response.statusCode}.');
+  }
+  return utf8.encode(await _readBoundedResponse(response, 5 * 1024 * 1024));
 }
 
 class RetainedSource {
@@ -556,8 +866,8 @@ Future<Map<String, int>> catalogSizes(File catalog) async {
   return <String, int>{
     for (final region in objectList(value['regions'], 'catalog.regions'))
       string(region['id'], 'region.id'): integer(
-        region['exactBytes'],
-        'region.exactBytes',
+        region['combinedExactBytes'] ?? region['exactBytes'],
+        'region.combinedExactBytes',
       ),
   };
 }
@@ -571,7 +881,9 @@ List<List<String>> planShards(
         for (final region in regions)
           (
             id: string(region['id'], 'region.id'),
-            size: priorSizes[string(region['id'], 'region.id')] ?? 700000000,
+            size:
+                (priorSizes[string(region['id'], 'region.id')] ?? 700000000) +
+                _routingSourceBytes(region),
           ),
       ]..sort((left, right) {
         final bySize = right.size.compareTo(left.size);
@@ -608,6 +920,13 @@ List<List<String>> planShards(
     }
   }
   return List.unmodifiable(shards.map(List<String>.unmodifiable));
+}
+
+int _routingSourceBytes(Map<String, Object?> region) {
+  if (region['routingBuild'] == null) return 0;
+  final routing = object(region['routingBuild'], 'region.routingBuild');
+  final source = object(routing['source'], 'region.routingBuild.source');
+  return integer(source['exactBytes'], 'region.routingBuild.source.exactBytes');
 }
 
 void validateDraftIdentity(

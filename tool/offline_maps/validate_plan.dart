@@ -22,11 +22,29 @@ Future<void> main(List<String> arguments) async {
     );
     final matrix = await readJsonObject(File('${directory.path}/matrix.json'));
     final target = required('--target').toLowerCase();
+    final regions = objectList(manifest['regions'], 'manifest.regions');
+    final routingRegions = regions
+        .where((region) => region['routingBuild'] != null)
+        .toList(growable: false);
+    final routingTags = <String>{
+      for (final region in routingRegions)
+        string(
+          object(region['routingBuild'], 'routingBuild')['releaseTag'],
+          'routingBuild.releaseTag',
+        ),
+    };
+    final releaseRoutingTag = release['routingReleaseTag'];
     if (release['mode'] != required('--mode') ||
         release['repository'] != required('--repository') ||
         release['targetCommitish'] != target ||
         manifest['releaseTag'] != release['releaseTag'] ||
-        objectList(manifest['regions'], 'manifest.regions').length != 554) {
+        regions.length != 554 ||
+        release['routingRegionCount'] != routingRegions.length ||
+        routingTags.length > 1 ||
+        (routingTags.isEmpty
+            ? releaseRoutingTag != null || release['routingReleaseId'] != 0
+            : releaseRoutingTag != routingTags.single ||
+                  (release['routingReleaseId'] is! int))) {
       throw const AutomationException(
         'Existing plan identity does not match rerun.',
       );

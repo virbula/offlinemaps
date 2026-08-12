@@ -4,6 +4,20 @@ EasyElevation offline maps are prebuilt Protomaps vector basemaps in PMTiles
 version 3. They are free public GitHub Release assets. The PMTiles-only build
 does not require containers, a database, or a tile-rendering server.
 
+Offline routing companions are integrity-verified Valhalla graph archives
+(`.vtiles.tar`) built in a digest-pinned container from immutable dated
+Geofabrik `.osm.pbf` extracts. Discovery reads only Geofabrik's small index,
+HEAD responses, and MD5 sidecars. Each build then downloads one PBF, verifies
+its provider digest, computes a strong SHA-256 for provenance, builds with
+container networking disabled, and cleans up the source.
+
+Valhalla 3.6.3 graph files are not byte-for-byte reproducible across separate
+builds. The pipeline hashes every graph and atomically labels each Actions
+release asset with the exact PBF source SHA-256. An interrupted-run rerun keeps
+an existing graph only when its remote size, SHA-256, and source-provenance
+label all validate; it never substitutes newly rebuilt bytes under the same
+immutable asset name.
+
 This repository owns the complete local toolchain as well as the GitHub Actions
 automation. `plan_offline_maps`, `validate_offline_maps`, and
 `build_offline_maps` never create or modify a GitHub release. Manual upload is
@@ -55,13 +69,33 @@ Darwin arm64/x86-64 and Linux arm64/x86-64 are supported.
 
 ## One-command build
 
-Install Dart, GNU Make, `curl`, a SHA-256 utility (`shasum` or `sha256sum`),
-and either `unzip` (macOS assets) or `tar` (Linux assets). Run commands from
-the `offlinemaps` repository root:
+Install Dart, GNU Make, `curl`, `jq`, a SHA-256 utility (`shasum` or
+`sha256sum`), and either `unzip` (macOS assets) or `tar` (Linux assets). A
+routing-enabled configuration also requires a running Docker daemon; the
+one-command build pulls the exact manifest-pinned Valhalla image itself. Run
+commands from the `offlinemaps` repository root:
 
 ```sh
 make build_offline_maps
 ```
+
+The production configuration builds paired outputs. These explicit commands
+are useful for routing-focused operation and bounded validation:
+
+```sh
+make plan_offline_maps_with_routing     # no PBF body downloads
+make test_offline_routing_fixture       # synthetic, no global build
+make validate_offline_routing_container # real Andorra build + 3 route modes
+make build_offline_routing_fixture      # same validation, retain graph for apps
+make build_offline_maps_with_routing    # full paired build
+```
+
+`build_offline_routing_fixture` writes the validated graph to
+`build/fixtures/andorra-3.6.3.vtiles.tar`. Override
+`OFFLINE_ROUTING_FIXTURE_OUTPUT` when a native test harness needs another
+explicit location. The validator first routes auto, pedestrian, and bicycle in
+the network-isolated pinned 3.6.3 container; it retains the graph only after all
+three pass.
 
 Builder-owned scratch state and the complete local release bundle are ignored
 under `build/`. After a successful real build, the four small reviewable
@@ -77,6 +111,7 @@ offlinemaps/
     staging/<in-progress PMTiles>
     output/
       <completed PMTiles; ignored by Git>
+      <completed .vtiles.tar routing packs; ignored by Git>
       catalog.json
       offline-regions.generated.json
       provenance.json
@@ -203,6 +238,37 @@ The generated catalog is strictly schema version 2:
 - sizes, addressed tile counts, and SHA-256 values come from verified output;
 - release URLs point to immutable versioned `.pmtiles` assets; and
 - geographic hierarchy fields are copied from the reviewed build manifest.
+
+Each region also declares `routingAvailable` and `combinedExactBytes`. When a
+graph exists, its `routing` object records exact bytes, SHA-256, immutable URL,
+version, timestamp, `engine: valhalla`, the configured Valhalla
+`engineVersion`, driving/walking/bicycling modes, the immutable input URL,
+input byte length/provider MD5/computed SHA-256, plus attribution and license.
+Clients must reject an offline graph whose engine or engine version is not
+compatible with the routing runtime embedded in that app build.
+The app downloads the map and graph together logically, verifies both, and
+continues to support map-only regions explicitly.
+
+The assets use two coordinated releases because 554 maps + 554 graphs + four
+metadata assets exceed GitHub's 1,000-assets-per-release cap. Graphs publish to
+`routing-<version>` first with `make_latest=false`; only after every graph is
+publicly verified does `maps-<version>` publish and become latest.
+
+```sh
+make publish_offline_maps_github \
+  OFFLINE_MAP_PUBLISH_CONFIRM=maps-2026.08.12 \
+  OFFLINE_ROUTING_PUBLISH_CONFIRM=routing-2026.08.12
+```
+
+## Routing data licensing
+
+Valhalla is MIT-licensed software, but its generated graph database is not
+public domain. Graphs are derived from Geofabrik-distributed OpenStreetMap data
+and remain under ODbL 1.0. Preserve `© OpenStreetMap contributors`, the
+OpenStreetMap copyright URL, the ODbL URL, and share-alike requirements when
+redistributing an adapted database. Geofabrik is the download provider, not an
+alternate data license. The routing graph cannot render roads, so the PMTiles
+basemap remains a separate required download.
 
 This repository intentionally separates large release assets from reviewable
 release metadata. Keep completed `.pmtiles` archives in the ignored

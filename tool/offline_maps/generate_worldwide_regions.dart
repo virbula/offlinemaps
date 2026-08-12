@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
+import 'build_routing.dart';
+
 const String _usage = '''
 Generate a worldwide EasyElevation PMTiles build manifest.
 
@@ -344,6 +346,116 @@ class WorldwideRegionGenerationResult {
   final int subdivisionCount;
 }
 
+class RoutingDatasetConfiguration {
+  const RoutingDatasetConfiguration({
+    required this.version,
+    required this.updatedAt,
+    required this.releaseTag,
+    required this.sources,
+    required this.minimumRegionCount,
+    required this.minimumCountryCount,
+    required this.requiredContinents,
+  });
+
+  factory RoutingDatasetConfiguration.fromJson(Object? value) {
+    final map = _object(value, 'routingDataset');
+    _rejectUnknown(map, const <String>{
+      'enabled',
+      'required',
+      'provider',
+      'minimumRegionCount',
+      'minimumCountryCount',
+      'requiredContinents',
+      'version',
+      'updatedAt',
+      'releaseTag',
+      'sources',
+    }, 'routingDataset');
+    if (map['enabled'] is! bool ||
+        map['required'] is! bool ||
+        map['provider'] != 'geofabrik') {
+      throw const WorldwideRegionException(
+        'routingDataset must declare boolean enabled/required and the '
+        'geofabrik provider.',
+      );
+    }
+    final version = _string(map['version'], 'routingDataset.version');
+    final releaseTag = _string(map['releaseTag'], 'routingDataset.releaseTag');
+    if (!_worldwideVersionPattern.hasMatch(version) ||
+        releaseTag != 'routing-$version') {
+      throw const WorldwideRegionException(
+        'routingDataset version/tag must use matching '
+        'YYYY.MM.REVISION and routing-YYYY.MM.REVISION values.',
+      );
+    }
+    final rawSources = _object(map['sources'], 'routingDataset.sources');
+    final minimumRegionCount = _integer(
+      map['minimumRegionCount'],
+      'routingDataset.minimumRegionCount',
+    );
+    final minimumCountryCount = _integer(
+      map['minimumCountryCount'],
+      'routingDataset.minimumCountryCount',
+    );
+    final requiredContinents = _strings(
+      map['requiredContinents'],
+      'routingDataset.requiredContinents',
+    ).toSet();
+    if (minimumRegionCount < 1 ||
+        minimumRegionCount > 553 ||
+        minimumCountryCount < 1 ||
+        minimumCountryCount > minimumRegionCount ||
+        requiredContinents.isEmpty ||
+        requiredContinents.any(
+          (value) => !const <String>{
+            'AF',
+            'AS',
+            'EU',
+            'NA',
+            'OC',
+            'SA',
+          }.contains(value),
+        )) {
+      throw const WorldwideRegionException(
+        'routingDataset coverage contract is invalid.',
+      );
+    }
+    final sources = <String, ValhallaRoutingSource>{};
+    for (final entry in rawSources.entries) {
+      if (!RegExp(r'^[a-z0-9][a-z0-9._-]{0,62}$').hasMatch(entry.key)) {
+        throw WorldwideRegionException(
+          'routingDataset source id ${entry.key} is unsafe.',
+        );
+      }
+      try {
+        sources[entry.key] = ValhallaRoutingSource.fromJson(
+          entry.value,
+          'routingDataset.sources.${entry.key}',
+        );
+      } on RoutingBuildException catch (error) {
+        throw WorldwideRegionException(error.message);
+      }
+    }
+    return RoutingDatasetConfiguration(
+      version: version,
+      updatedAt: _utcTimestamp(map['updatedAt'], 'routingDataset.updatedAt'),
+      releaseTag: releaseTag,
+      sources: Map.unmodifiable(sources),
+      minimumRegionCount: minimumRegionCount,
+      minimumCountryCount: minimumCountryCount,
+      requiredContinents: Set.unmodifiable(requiredContinents),
+    );
+  }
+
+  final String version;
+  final DateTime updatedAt;
+  final String releaseTag;
+  final Map<String, ValhallaRoutingSource> sources;
+  final int minimumRegionCount;
+  final int minimumCountryCount;
+  final Set<String> requiredContinents;
+}
+
 Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
   required File manifestFile,
   required File outputManifest,
@@ -357,6 +469,22 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
   final configuration = WorldwideRegionConfiguration.fromJson(
     manifest['worldwideRegions'],
   );
+  final routingDataset = manifest['routingDataset'] == null
+      ? null
+      : RoutingDatasetConfiguration.fromJson(manifest['routingDataset']);
+  final rawRoutingDataset = manifest['routingDataset'] == null
+      ? null
+      : _object(manifest['routingDataset'], 'routingDataset');
+  final routingEnabled = rawRoutingDataset?['enabled'] == true;
+  if (routingEnabled &&
+      routingDataset != null &&
+      routingDataset.sources.isNotEmpty) {
+    try {
+      ValhallaRoutingBuilderConfiguration.fromJson(manifest['routingBuilder']);
+    } on RoutingBuildException catch (error) {
+      throw WorldwideRegionException(error.message);
+    }
+  }
   final generatedAt = _utcTimestamp(manifest['generatedAt'], 'generatedAt');
   final releaseTag = _string(manifest['releaseTag'], 'releaseTag');
   if (releaseTag != 'maps-${configuration.version}') {
@@ -476,6 +604,16 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
           countryCode: countryCode,
           admin0: admin0,
         ),
+        if (routingEnabled &&
+            routingDataset != null &&
+            routingDataset.sources.containsKey(id))
+          'routingBuild': <String, Object?>{
+            'file': '$id-routing-${routingDataset.version}.vtiles.tar',
+            'releaseTag': routingDataset.releaseTag,
+            'version': routingDataset.version,
+            'updatedAt': routingDataset.updatedAt.toIso8601String(),
+            'source': routingDataset.sources[id]!.toJson(),
+          },
       });
       if (subdivision) {
         subdivisionCount++;
@@ -506,6 +644,40 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
     if (right['id'] == 'world-overview-road') return 1;
     return (left['id']! as String).compareTo(right['id']! as String);
   });
+  final generatedIds = regions.map((region) => region['id']! as String).toSet();
+  final unknownRoutingIds =
+      routingDataset?.sources.keys
+          .where((id) => !generatedIds.contains(id))
+          .toList(growable: false) ??
+      const <String>[];
+  if (unknownRoutingIds.isNotEmpty) {
+    throw WorldwideRegionException(
+      'routingDataset contains unknown region ids: '
+      '${unknownRoutingIds.join(', ')}.',
+    );
+  }
+  if (rawRoutingDataset?['enabled'] == true &&
+      rawRoutingDataset?['required'] == true &&
+      (regions.where((region) => region['routingBuild'] != null).length <
+              routingDataset!.minimumRegionCount ||
+          regions
+                  .where((region) => region['routingBuild'] != null)
+                  .map((region) => region['countryCode'])
+                  .whereType<String>()
+                  .toSet()
+                  .length <
+              routingDataset.minimumCountryCount ||
+          !regions
+              .where((region) => region['routingBuild'] != null)
+              .map((region) => region['continent'])
+              .whereType<String>()
+              .toSet()
+              .containsAll(routingDataset.requiredContinents))) {
+    throw const WorldwideRegionException(
+      'Generated routing regions do not satisfy the configured worldwide '
+      'coverage contract.',
+    );
+  }
   _validateGeneratedHierarchy(
     regions,
     expectedVersion: configuration.version,
@@ -519,7 +691,9 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
   }
   final generated = <String, Object?>{
     for (final entry in manifest.entries)
-      if (entry.key != 'worldwideRegions' && entry.key != 'regions')
+      if (entry.key != 'worldwideRegions' &&
+          entry.key != 'routingDataset' &&
+          entry.key != 'regions')
         entry.key: entry.value,
     'regions': regions,
   };
@@ -1152,6 +1326,17 @@ int _integer(Object? value, String field) {
     return value.toInt();
   }
   throw WorldwideRegionException('$field must be an integer.');
+}
+
+List<String> _strings(Object? value, String field) {
+  if (value is! List || value.any((entry) => entry is! String)) {
+    throw WorldwideRegionException('$field must be a string array.');
+  }
+  final result = value.cast<String>().map((entry) => entry.trim()).toList();
+  if (result.isEmpty || result.any((entry) => entry.isEmpty)) {
+    throw WorldwideRegionException('$field must contain non-empty strings.');
+  }
+  return result;
 }
 
 Uri _httpsUri(Object? value, String field) {

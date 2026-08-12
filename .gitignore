@@ -2,6 +2,10 @@
 *.pmtiles
 *.pmtiles.part
 *.pmtiles.previous
+*.vtiles.tar
+*.vtiles.tar.part
+*.vtiles.tar.previous
+*.osm.pbf
 *.part
 
 # Build scratch is ignored except for the immutable first-release takeover

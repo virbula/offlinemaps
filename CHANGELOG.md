@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Added paired regional Valhalla routing-pack build, validation, publication,
+  recovery, and catalog metadata alongside the existing PMTiles pipeline.
+- Added exact routing availability, graph/combined sizes, SHA-256, source
+  identity, Valhalla engine compatibility, version/timestamp, modes,
+  attribution, and ODbL metadata.
+- Added lightweight immutable Geofabrik discovery, worldwide coverage guards,
+  bounded fixture tests, and per-shard source cleanup.
+- Split map and routing assets into coordinated releases to respect GitHub's
+  1,000-asset cap and publish routing before advertising the map catalog.
+- Added atomic routing source-provenance labels so workflow reruns retain the
+  exact uploaded Valhalla graph without assuming byte-for-byte reproducibility.
+
 ## 1.1.1+1 — 2026-08-11
 
 - Moved the complete local PMTiles release bundle out of the repository root

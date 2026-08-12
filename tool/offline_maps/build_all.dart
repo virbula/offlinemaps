@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 import 'build_region.dart';
+import 'build_routing.dart';
 
 const _usage = '''
 Build every configured EasyElevation PMTiles region sequentially.
@@ -45,6 +46,8 @@ typedef PmtilesRegionBuilder =
     Future<PmtilesArchiveInspection> Function(
       PmtilesRegionBuildRequest request,
     );
+typedef ValhallaRegionBuilder =
+    Future<File> Function(ValhallaRoutingBuildRequest request);
 
 class OfflineMapBuildException implements Exception {
   const OfflineMapBuildException(this.message);
@@ -244,6 +247,7 @@ class OfflineMapBuildRegion {
     required this.subdivisionCode,
     required this.group,
     required this.continent,
+    required this.routing,
   });
 
   factory OfflineMapBuildRegion.fromJson(
@@ -271,6 +275,7 @@ class OfflineMapBuildRegion {
       'subdivisionCode',
       'group',
       'continent',
+      'routingBuild',
     }, 'region');
     final enabled = map['enabled'] ?? true;
     if (enabled is! bool) {
@@ -380,6 +385,12 @@ class OfflineMapBuildRegion {
       subdivisionCode: subdivision,
       group: group,
       continent: continent,
+      routing: map['routingBuild'] == null
+          ? null
+          : ValhallaRoutingRegionConfiguration.fromJson(
+              map['routingBuild'],
+              field: 'region.routingBuild',
+            ),
     );
   }
 
@@ -403,6 +414,7 @@ class OfflineMapBuildRegion {
   final String? subdivisionCode;
   final String? group;
   final String? continent;
+  final ValhallaRoutingRegionConfiguration? routing;
 }
 
 class OfflineMapBuildManifest {
@@ -413,6 +425,7 @@ class OfflineMapBuildManifest {
     required this.releaseTag,
     required this.source,
     required this.builder,
+    required this.routingBuilder,
     required this.regions,
   });
 
@@ -428,6 +441,7 @@ class OfflineMapBuildManifest {
       'releaseTag',
       'source',
       'builder',
+      'routingBuilder',
       'regions',
     }, 'manifest');
     final schema = _integer(map['schemaVersion'], 'schemaVersion');
@@ -459,9 +473,26 @@ class OfflineMapBuildManifest {
           ),
         )
         .toList(growable: false);
+    final routingRegions = regions.where((region) => region.routing != null);
+    final routingBuilder = routingRegions.isEmpty
+        ? null
+        : ValhallaRoutingBuilderConfiguration.fromJson(map['routingBuilder']);
+    final routingReleaseTags = routingRegions
+        .map((region) => region.routing!.releaseTag)
+        .toSet();
+    final routingVersions = routingRegions
+        .map((region) => region.routing!.version)
+        .toSet();
+    if (routingReleaseTags.length > 1 || routingVersions.length > 1) {
+      throw const OfflineMapBuildException(
+        'Routing regions must share one coordinated version and release tag.',
+      );
+    }
     if (!regions.any((region) => region.enabled) ||
         regions.map((region) => region.id).toSet().length != regions.length ||
-        regions.map((region) => region.file).toSet().length != regions.length) {
+        regions.map((region) => region.file).toSet().length != regions.length ||
+        routingRegions.map((region) => region.routing!.file).toSet().length !=
+            routingRegions.length) {
       throw const OfflineMapBuildException(
         'Regions need unique ids/files and at least one enabled entry.',
       );
@@ -473,6 +504,7 @@ class OfflineMapBuildManifest {
       releaseTag: releaseTag,
       source: PmtilesBuildSource.fromJson(map['source']),
       builder: PmtilesToolConfiguration.fromJson(map['builder']),
+      routingBuilder: routingBuilder,
       regions: List.unmodifiable(regions),
     );
   }
@@ -483,6 +515,7 @@ class OfflineMapBuildManifest {
   final String releaseTag;
   final PmtilesBuildSource source;
   final PmtilesToolConfiguration builder;
+  final ValhallaRoutingBuilderConfiguration? routingBuilder;
   final List<OfflineMapBuildRegion> regions;
 
   List<OfflineMapBuildRegion> get enabledRegions =>
@@ -496,6 +529,10 @@ class _BuiltArtifact {
     required this.inspection,
     required this.sha256,
     required this.exactBytes,
+    required this.routingFile,
+    required this.routingSha256,
+    required this.routingExactBytes,
+    required this.routingSourceSha256,
   });
 
   final OfflineMapBuildRegion region;
@@ -503,6 +540,10 @@ class _BuiltArtifact {
   final PmtilesArchiveInspection inspection;
   final String sha256;
   final int exactBytes;
+  final File? routingFile;
+  final String? routingSha256;
+  final int? routingExactBytes;
+  final String? routingSourceSha256;
 }
 
 Future<void> buildAllOfflineMaps(
@@ -513,6 +554,7 @@ Future<void> buildAllOfflineMaps(
   required Directory cacheDirectory,
   PmtilesSourceValidator sourceValidator = validatePmtilesBuildSource,
   PmtilesRegionBuilder? regionBuilder,
+  ValhallaRegionBuilder? routingRegionBuilder,
   PmtilesCommandRunner runner = const SystemPmtilesCommandRunner(),
 }) async {
   await outputDirectory.create(recursive: true);
@@ -520,6 +562,9 @@ Future<void> buildAllOfflineMaps(
   await cacheDirectory.create(recursive: true);
   await validatePmtilesTool(manifest.builder, runner: runner);
   await sourceValidator(manifest.source);
+  if (manifest.routingBuilder != null && routingRegionBuilder == null) {
+    await validateValhallaRoutingTool(manifest.routingBuilder!);
+  }
   final artifacts = <_BuiltArtifact>[];
   for (var index = 0; index < manifest.enabledRegions.length; index++) {
     final region = manifest.enabledRegions[index];
@@ -553,6 +598,60 @@ Future<void> buildAllOfflineMaps(
     }
     final destination = File(path.join(outputDirectory.path, region.file));
     final promotedSha256 = await _replaceArtifact(staged, destination);
+    File? routingDestination;
+    String? routingSha256;
+    int? routingBytes;
+    final routing = region.routing;
+    String? routingSourceSha256 = routing?.source.sha256;
+    if (routing != null) {
+      final stagedRouting = File(
+        path.join(stagingDirectory.path, routing.file),
+      );
+      if (await stagedRouting.exists()) await stagedRouting.delete();
+      final routingSourceCache = Directory(
+        path.join(cacheDirectory.path, 'routing-source-${region.id}'),
+      );
+      final request = ValhallaRoutingBuildRequest(
+        regionId: region.id,
+        source: routing.source,
+        output: stagedRouting,
+        workDirectory: Directory(
+          path.join(stagingDirectory.path, 'routing-work'),
+        ),
+        cacheDirectory: routingSourceCache,
+        builder: manifest.routingBuilder!,
+        routingUpdatedAt: routing.updatedAt,
+      );
+      File built;
+      try {
+        built = routingRegionBuilder == null
+            ? await buildValhallaRoutingPack(
+                request,
+                onSourceSha256: (digest) => routingSourceSha256 = digest,
+              )
+            : await routingRegionBuilder(request);
+      } finally {
+        if (await routingSourceCache.exists()) {
+          await routingSourceCache.delete(recursive: true);
+        }
+      }
+      if (routingSourceSha256 == null ||
+          !routingSha256Pattern.hasMatch(routingSourceSha256!)) {
+        throw OfflineMapBuildException(
+          '${routing.file} did not record its PBF source SHA-256.',
+        );
+      }
+      routingBytes = await built.length();
+      if (routingBytes <= 0 || routingBytes > maximumRoutingAssetBytes) {
+        throw OfflineMapBuildException(
+          '${routing.file} is empty or exceeds the routing pack limit.',
+        );
+      }
+      routingDestination = File(path.join(outputDirectory.path, routing.file));
+      routingSha256 =
+          await _replaceArtifact(built, routingDestination) ??
+          await _fileSha256(routingDestination);
+    }
     artifacts.add(
       _BuiltArtifact(
         region: region,
@@ -560,6 +659,10 @@ Future<void> buildAllOfflineMaps(
         inspection: inspection,
         sha256: promotedSha256 ?? await _fileSha256(destination),
         exactBytes: bytes,
+        routingFile: routingDestination,
+        routingSha256: routingSha256,
+        routingExactBytes: routingBytes,
+        routingSourceSha256: routingSourceSha256,
       ),
     );
   }
@@ -572,7 +675,14 @@ Future<void> buildAllOfflineMaps(
     'generatedAt': manifest.generatedAt.toIso8601String(),
     'archiveFormat': 'pmtiles',
     'tileType': 'mvt',
-    'regions': artifacts.map(_catalogRegion).toList(growable: false),
+    'regions': artifacts
+        .map(
+          (artifact) => _catalogRegion(
+            artifact,
+            routingEngineVersion: manifest.routingBuilder?.version,
+          ),
+        )
+        .toList(growable: false),
   });
   final catalog = File(path.join(outputDirectory.path, 'catalog.json'));
   await _writeJson(catalog, jsonDecode(await generated.readAsString()));
@@ -589,6 +699,14 @@ Future<void> buildAllOfflineMaps(
       'executable': manifest.builder.executable,
       'downloadThreads': manifest.builder.downloadThreads,
     },
+    if (manifest.routingBuilder case final routingBuilder?)
+      'routingBuilder': <String, Object?>{
+        'name': 'valhalla',
+        'version': routingBuilder.version,
+        'image': routingBuilder.image,
+        'dockerExecutable': routingBuilder.dockerExecutable,
+        'buildConcurrency': routingBuilder.buildConcurrency,
+      },
     'source': <String, Object?>{
       'url': manifest.source.url.toString(),
       'metadataUrl': manifest.source.metadataUrl.toString(),
@@ -605,23 +723,37 @@ Future<void> buildAllOfflineMaps(
             'outputSha256': artifact.sha256,
             'outputBytes': artifact.exactBytes,
             'addressedTiles': artifact.inspection.addressedTiles,
+            if (artifact.routingFile != null) ...<String, Object?>{
+              'routingFile': path.basename(artifact.routingFile!.path),
+              'routingOutputSha256': artifact.routingSha256,
+              'routingOutputBytes': artifact.routingExactBytes,
+              'routingSourceSha256': artifact.routingSourceSha256,
+              'routingSourceInput': artifact.region.routing!.source.toJson(),
+            },
           },
         )
         .toList(growable: false),
   });
   await _writeChecksums(outputDirectory, <File>[
     ...artifacts.map((artifact) => artifact.file),
+    ...artifacts.map((artifact) => artifact.routingFile).whereType<File>(),
     generated,
     catalog,
     provenance,
   ]);
   stdout.writeln(
-    'Built ${artifacts.length} PMTiles region(s) in ${outputDirectory.path}',
+    'Built ${artifacts.length} PMTiles region(s) and '
+    '${artifacts.where((artifact) => artifact.routingFile != null).length} '
+    'Valhalla routing pack(s) in ${outputDirectory.path}',
   );
 }
 
-Map<String, Object?> _catalogRegion(_BuiltArtifact artifact) {
+Map<String, Object?> _catalogRegion(
+  _BuiltArtifact artifact, {
+  required String? routingEngineVersion,
+}) {
   final region = artifact.region;
+  final routingBytes = artifact.routingExactBytes;
   return <String, Object?>{
     'file': region.file,
     'id': region.id,
@@ -640,9 +772,37 @@ Map<String, Object?> _catalogRegion(_BuiltArtifact artifact) {
     'tileCompression': artifact.inspection.tileCompression,
     'tileCount': artifact.inspection.addressedTiles,
     'exactBytes': artifact.exactBytes,
+    'combinedExactBytes': artifact.exactBytes + (routingBytes ?? 0),
     'sha256': artifact.sha256,
     'updatedAt': region.updatedAt.toIso8601String(),
     'downloadUrl': region.downloadUrl.toString(),
+    'routingAvailable': region.routing != null,
+    if (region.routing case final routing?)
+      'routing': <String, Object?>{
+        'format': 'valhalla-tar',
+        'engine': routingEngine,
+        'engineVersion': routingEngineVersion,
+        'file': routing.file,
+        'exactBytes': routingBytes,
+        'sha256': artifact.routingSha256,
+        'sourceSha256': artifact.routingSourceSha256,
+        'sourceInput': routing.source.toJson(),
+        'downloadUrl': Uri.https(
+          'github.com',
+          '/${region.downloadUrl.pathSegments[0]}/'
+              '${region.downloadUrl.pathSegments[1]}/releases/download/'
+              '${routing.releaseTag}/${routing.file}',
+        ).toString(),
+        'updatedAt': routing.updatedAt.toIso8601String(),
+        'version': routing.version,
+        'modes': supportedRoutingModes,
+        'attribution': routingDataAttribution,
+        'attributionUrl': routingDataAttributionUrl,
+        'license': routingDataLicense,
+        'licenseUrl': routingDataLicenseUrl,
+        'sourceProvider': routingDataSource,
+        'sourceUrl': routingDataSourceUrl,
+      },
     if (region.countryCode != null) 'countryCode': region.countryCode,
     if (region.subdivisionCode != null)
       'subdivisionCode': region.subdivisionCode,
@@ -731,6 +891,13 @@ void printOfflineMapBuildPlan(
       '${manifest.source.url} ${region.file} $shape '
       '--minzoom=${region.minZoom} --maxzoom=${region.maxZoom}',
     );
+    if (region.routing case final routing?) {
+      stdout.writeln(
+        '${region.id}: ${manifest.routingBuilder!.dockerExecutable} run '
+        '${manifest.routingBuilder!.image} -> ${routing.file} from '
+        '${routing.source.url}',
+      );
+    }
   }
 }
 
@@ -909,6 +1076,9 @@ Future<void> main(List<String> arguments) async {
     if (options.validateOnly) {
       await validatePmtilesTool(manifest.builder);
       await validatePmtilesBuildSource(manifest.source);
+      if (manifest.routingBuilder != null) {
+        await validateValhallaRoutingTool(manifest.routingBuilder!);
+      }
       for (final region in manifest.enabledRegions) {
         if (region.geoJsonPath != null) {
           final geoJson = File(
@@ -944,6 +1114,9 @@ Future<void> main(List<String> arguments) async {
     stderr.writeln('ERROR: ${error.message}');
     exitCode = 64;
   } on PmtilesBuildException catch (error) {
+    stderr.writeln('ERROR: ${error.message}');
+    exitCode = 1;
+  } on RoutingBuildException catch (error) {
     stderr.writeln('ERROR: ${error.message}');
     exitCode = 1;
   } on Object catch (error, stackTrace) {

@@ -118,6 +118,42 @@ void main() {
     expect(delays, isEmpty);
   });
 
+  test('routing draft carries the reviewed attribution body', () async {
+    Map<String, Object?>? sent;
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        sent = jsonBody;
+        return (statusCode: 201, body: jsonEncode(_releaseJson));
+      },
+    );
+    addTearDown(client.close);
+
+    await client.createDraft(
+      tag: 'routing-2026.08.1',
+      target: 'a' * 40,
+      title: 'Routing',
+      body: '© OpenStreetMap contributors · ODbL 1.0',
+    );
+
+    expect(sent!['body'], contains('OpenStreetMap'));
+    expect(sent!['body'], contains('ODbL'));
+  });
+
+  test('release assets retain an optional atomic provenance label', () {
+    final asset = GitHubReleaseAsset.fromJson(<String, Object?>{
+      'id': 7,
+      'name': 'ad-routing.vtiles.tar',
+      'size': 42,
+      'digest': 'sha256:${'a' * 64}',
+      'state': 'uploaded',
+      'label': 'easyelevation-routing-source-sha256:${'b' * 64}',
+    });
+
+    expect(asset.label, 'easyelevation-routing-source-sha256:${'b' * 64}');
+  });
+
   test('POST server response is not blindly retried', () async {
     final delays = <Duration>[];
     var calls = 0;

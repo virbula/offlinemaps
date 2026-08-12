@@ -22,6 +22,7 @@ class GitHubReleaseAsset {
     required this.size,
     required this.digest,
     required this.state,
+    this.label,
   });
 
   factory GitHubReleaseAsset.fromJson(Object? value) {
@@ -33,6 +34,7 @@ class GitHubReleaseAsset {
       size: integer(map['size'], 'asset.size'),
       digest: digest,
       state: string(map['state'], 'asset.state'),
+      label: optionalString(map['label'], 'asset.label'),
     );
   }
 
@@ -41,6 +43,7 @@ class GitHubReleaseAsset {
   final int size;
   final String? digest;
   final String state;
+  final String? label;
 }
 
 class GitHubRelease {
@@ -139,10 +142,22 @@ class GitHubReleaseClient {
     return GitHubRelease.fromJson(jsonDecode(response.body));
   }
 
+  Future<GitHubRelease?> latestRelease() async {
+    final response = await _request(
+      'GET',
+      Uri.https('api.github.com', '/repos/$repository/releases/latest'),
+      accepted: const <int>{200, 404},
+    );
+    return response.statusCode == 404
+        ? null
+        : GitHubRelease.fromJson(jsonDecode(response.body));
+  }
+
   Future<GitHubRelease> createDraft({
     required String tag,
     required String target,
     required String title,
+    String? body,
   }) async {
     final response = await _request(
       'POST',
@@ -151,6 +166,7 @@ class GitHubReleaseClient {
         'tag_name': tag,
         'target_commitish': target,
         'name': title,
+        'body': ?body,
         'draft': true,
         'prerelease': false,
         'make_latest': 'false',
@@ -193,6 +209,7 @@ class GitHubReleaseClient {
     required int releaseId,
     required File file,
     String contentType = 'application/octet-stream',
+    String? label,
   }) async {
     final name = basename(file);
     final size = await file.length();
@@ -204,7 +221,7 @@ class GitHubReleaseClient {
           Uri.https(
             'uploads.github.com',
             '/repos/$repository/releases/$releaseId/assets',
-            <String, String>{'name': name},
+            <String, String>{'name': name, 'label': ?label},
           ),
         );
         request.headers.contentType = ContentType.parse(contentType);
@@ -214,12 +231,21 @@ class GitHubReleaseClient {
         final body = await utf8.decoder.bind(response).join();
         if (response.statusCode == 201) {
           final uploaded = GitHubReleaseAsset.fromJson(jsonDecode(body));
-          if (uploaded.name != name || uploaded.size != size) {
+          if (uploaded.name != name ||
+              uploaded.size != size ||
+              (label != null && uploaded.label != label)) {
             throw AutomationException(
               'GitHub accepted $name but returned mismatched asset metadata.',
             );
           }
-          if (assetMatches(uploaded, exactBytes: size, sha256: digest)) return;
+          if (_uploadedAssetMatches(
+            uploaded,
+            exactBytes: size,
+            sha256: digest,
+            label: label,
+          )) {
+            return;
+          }
           // Digest publication can be eventually consistent after a 201.
           for (var check = 0; check < 5; check++) {
             await Future<void>.delayed(Duration(seconds: 1 << check));
@@ -227,20 +253,22 @@ class GitHubReleaseClient {
               releaseId,
             )).where((asset) => asset.name == name).toList(growable: false);
             if (matches.length == 1 &&
-                assetMatches(
+                _uploadedAssetMatches(
                   matches.single,
                   exactBytes: size,
                   sha256: digest,
+                  label: label,
                 )) {
               return;
             }
             if (matches.length > 1 ||
                 (matches.length == 1 &&
                     matches.single.digest != null &&
-                    !assetMatches(
+                    !_uploadedAssetMatches(
                       matches.single,
                       exactBytes: size,
                       sha256: digest,
+                      label: label,
                     ))) {
               throw AutomationException(
                 'GitHub accepted $name but its remote digest mismatches.',
@@ -267,7 +295,12 @@ class GitHubReleaseClient {
           throw AutomationException('Release contains duplicate asset $name.');
         }
         if (matches.length == 1) {
-          if (assetMatches(matches.single, exactBytes: size, sha256: digest)) {
+          if (_uploadedAssetMatches(
+            matches.single,
+            exactBytes: size,
+            sha256: digest,
+            label: label,
+          )) {
             return;
           }
           throw AutomationException(
@@ -291,7 +324,12 @@ class GitHubReleaseClient {
         throw AutomationException('Release contains duplicate asset $name.');
       }
       if (matches.length == 1) {
-        if (assetMatches(matches.single, exactBytes: size, sha256: digest)) {
+        if (_uploadedAssetMatches(
+          matches.single,
+          exactBytes: size,
+          sha256: digest,
+          label: label,
+        )) {
           return;
         }
         throw AutomationException(
@@ -426,6 +464,15 @@ bool assetMatches(
     asset.state == 'uploaded' &&
     asset.size == exactBytes &&
     asset.digest?.toLowerCase() == 'sha256:${sha256.toLowerCase()}';
+
+bool _uploadedAssetMatches(
+  GitHubReleaseAsset asset, {
+  required int exactBytes,
+  required String sha256,
+  required String? label,
+}) =>
+    assetMatches(asset, exactBytes: exactBytes, sha256: sha256) &&
+    (label == null || asset.label == label);
 
 Future<void> verifyPublicAsset({
   required Uri url,

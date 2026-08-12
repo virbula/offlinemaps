@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as path;
 
+import 'build_all.dart' show maximumOfflineMapAssetBytes;
+import 'build_routing.dart';
 import 'github_release_api.dart';
 import 'release_model.dart';
 
@@ -74,6 +76,48 @@ Future<void> recoverLatest({
   if (tag != expectedTag || provenance['githubRepository'] != repository) {
     throw const AutomationException('Provenance release identity is invalid.');
   }
+  final provenanceRoutingBuilder = provenance['routingBuilder'] == null
+      ? null
+      : object(provenance['routingBuilder'], 'provenance.routingBuilder');
+  final routingEngineVersion = provenanceRoutingBuilder == null
+      ? null
+      : string(
+          provenanceRoutingBuilder['version'],
+          'provenance.routingBuilder.version',
+        );
+  if (provenanceRoutingBuilder != null &&
+      (provenanceRoutingBuilder['name'] != routingEngine ||
+          !RegExp(r'^\d+\.\d+\.\d+$').hasMatch(routingEngineVersion!))) {
+    throw const AutomationException(
+      'Recovery routing builder identity is invalid.',
+    );
+  }
+  final source = object(provenance['source'], 'provenance.source');
+  final sourceUrl = httpsUri(source['url'], 'source.url');
+  final sourceMetadataUrl = httpsUri(
+    source['metadataUrl'],
+    'source.metadataUrl',
+  );
+  final sourceKey = string(source['key'], 'source.key');
+  final sourceBytes = integer(source['exactBytes'], 'source.exactBytes');
+  if (sourceUrl.host != 'build.protomaps.com' ||
+      sourceMetadataUrl.host != 'build-metadata.protomaps.dev' ||
+      !RegExp(r'^\d{8}\.pmtiles$').hasMatch(sourceKey) ||
+      sourceUrl.pathSegments.length != 1 ||
+      sourceUrl.pathSegments.single != sourceKey ||
+      sourceBytes < 100000000000 ||
+      !RegExp(
+        r'^4\.\d+\.\d+$',
+      ).hasMatch(string(source['tilesetVersion'], 'source.tilesetVersion')) ||
+      !b3Pattern.hasMatch(string(source['blake3'], 'source.blake3'))) {
+    throw const AutomationException('Recovery provenance source is invalid.');
+  }
+  final expectedSourceId = 'protomaps-${sourceKey.substring(0, 8)}';
+  final mapVersion = mapVersionForRecoveryTag(tag);
+  final generatedAt = utcTimestamp(
+    catalog['generatedAt'],
+    'catalog.generatedAt',
+  );
   final regions = objectList(catalog['regions'], 'catalog.regions');
   final ids = <String>{};
   final files = <String>{};
@@ -91,6 +135,105 @@ Future<void> recoverLatest({
       'Recovery catalog schema/time/554 unique regions are invalid.',
     );
   }
+  final routingExpected = <String, (int, String, Uri, String)>{};
+  final routingTags = <String>{};
+  for (final region in regions) {
+    final id = string(region['id'], 'region.id');
+    validateRecoveryMapDescriptor(
+      region,
+      id: id,
+      repository: repository,
+      tag: tag,
+      version: mapVersion,
+      generatedAt: generatedAt,
+      expectedSourceId: expectedSourceId,
+    );
+    final mapBytes = integer(region['exactBytes'], '$id.exactBytes');
+    final routing = region['routing'] == null
+        ? null
+        : object(region['routing'], '$id.routing');
+    if (region['routingAvailable'] != (routing != null)) {
+      throw AutomationException('$id routingAvailable is inconsistent.');
+    }
+    if (routing == null) {
+      if (region['combinedExactBytes'] != mapBytes) {
+        throw AutomationException('$id combinedExactBytes is invalid.');
+      }
+      continue;
+    }
+    final routeFile = string(routing['file'], '$id.routing.file');
+    final routeBytes = integer(routing['exactBytes'], '$id.routing.exactBytes');
+    final routeSha = string(routing['sha256'], '$id.routing.sha256');
+    final routeSourceSha = string(
+      routing['sourceSha256'],
+      '$id.routing.sourceSha256',
+    );
+    final routeVersion = string(routing['version'], '$id.routing.version');
+    final routeUrl = httpsUri(
+      routing['downloadUrl'],
+      '$id.routing.downloadUrl',
+    );
+    final segments = routeUrl.pathSegments;
+    if (routing['format'] != 'valhalla-tar' ||
+        routing['engine'] != routingEngine ||
+        routingEngineVersion == null ||
+        routing['engineVersion'] is! String ||
+        !RegExp(
+          r'^\d+\.\d+\.\d+$',
+        ).hasMatch(routing['engineVersion']! as String) ||
+        routing['engineVersion'] != routingEngineVersion ||
+        !routingAssetPattern.hasMatch(routeFile) ||
+        routeBytes <= 0 ||
+        routeBytes > maximumRoutingAssetBytes ||
+        !routingSha256Pattern.hasMatch(routeSha) ||
+        !routingSha256Pattern.hasMatch(routeSourceSha) ||
+        !_validRoutingSourceInput(routing['sourceInput']) ||
+        region['combinedExactBytes'] != mapBytes + routeBytes ||
+        !deepJsonEquals(routing['modes'], supportedRoutingModes) ||
+        routing['attribution'] != routingDataAttribution ||
+        routing['attributionUrl'] != routingDataAttributionUrl ||
+        routing['license'] != routingDataLicense ||
+        routing['licenseUrl'] != routingDataLicenseUrl ||
+        routing['sourceProvider'] != routingDataSource ||
+        routing['sourceUrl'] != routingDataSourceUrl ||
+        utcTimestamp(
+              routing['updatedAt'],
+              '$id.routing.updatedAt',
+            ).toIso8601String() !=
+            routing['updatedAt'] ||
+        segments.length != 6 ||
+        '${segments[0]}/${segments[1]}' != repository ||
+        segments[2] != 'releases' ||
+        segments[3] != 'download' ||
+        segments[5] != routeFile ||
+        segments[4] != 'routing-$routeVersion' ||
+        routeVersion != mapVersion ||
+        routing['updatedAt'] != generatedAt.toIso8601String() ||
+        routeUrl.host != 'github.com' ||
+        routeUrl.query.isNotEmpty ||
+        routeUrl.fragment.isNotEmpty ||
+        routingExpected.containsKey(routeFile)) {
+      throw AutomationException('$id routing descriptor is invalid.');
+    }
+    routingTags.add(segments[4]);
+    routingExpected[routeFile] = (
+      routeBytes,
+      routeSha,
+      routeUrl,
+      routeSourceSha,
+    );
+  }
+  if (routingTags.length > 1) {
+    throw const AutomationException(
+      'Recovery catalog references multiple routing releases.',
+    );
+  }
+  if (routingExpected.isNotEmpty != (routingEngineVersion != null)) {
+    throw const AutomationException(
+      'Recovery routing descriptors and builder identity are inconsistent.',
+    );
+  }
+  final routingTag = routingTags.isEmpty ? null : routingTags.single;
   final expected = <String, (int, String)>{
     for (final region in regions)
       string(region['file'], 'region.file'): (
@@ -130,6 +273,7 @@ Future<void> recoverLatest({
         region['sha256'],
         'region.sha256',
       ),
+    for (final entry in routingExpected.entries) entry.key: entry.value.$2,
     path.basename(catalogFile.path): await fileSha256(catalogFile),
     path.basename(generatedFile.path): await fileSha256(generatedFile),
     path.basename(provenanceFile.path): await fileSha256(provenanceFile),
@@ -154,21 +298,12 @@ Future<void> recoverLatest({
             record['file'] != catalogRecord['file'] ||
             record['outputSha256'] != catalogRecord['sha256'] ||
             record['outputBytes'] != catalogRecord['exactBytes'] ||
-            record['addressedTiles'] != catalogRecord['tileCount'];
+            record['addressedTiles'] != catalogRecord['tileCount'] ||
+            !_provenanceRoutingMatches(record, catalogRecord);
       })) {
     throw const AutomationException(
       'Recovery provenance region records differ.',
     );
-  }
-  final source = object(provenance['source'], 'provenance.source');
-  if (httpsUri(source['url'], 'source.url').host != 'build.protomaps.com' ||
-      httpsUri(source['metadataUrl'], 'source.metadataUrl').host !=
-          'build-metadata.protomaps.dev' ||
-      !RegExp(
-        r'^4\.\d+\.\d+$',
-      ).hasMatch(string(source['tilesetVersion'], 'source.tilesetVersion')) ||
-      !b3Pattern.hasMatch(string(source['blake3'], 'source.blake3'))) {
-    throw const AutomationException('Recovery provenance source is invalid.');
   }
   final github = GitHubReleaseClient(repository: repository, token: token);
   try {
@@ -180,6 +315,14 @@ Future<void> recoverLatest({
         release.tagName != tag) {
       throw const AutomationException(
         'Recovery release must be the exact public non-prerelease target.',
+      );
+    }
+    if (routingTag != null) {
+      await _validateRecoveryRoutingRelease(
+        github,
+        tag: routingTag,
+        target: target,
+        expected: routingExpected,
       );
     }
     final assets = await github.listAssets(release.id);
@@ -210,6 +353,21 @@ Future<void> recoverLatest({
           ),
           exactBytes: integer(region['exactBytes'], 'exactBytes'),
           expectedSha256: string(region['sha256'], 'sha256'),
+          allowRange: true,
+        ),
+      );
+      if (tasks.length == 8) {
+        await Future.wait(tasks);
+        tasks.clear();
+      }
+    }
+    if (tasks.isNotEmpty) await Future.wait(tasks);
+    for (final entry in routingExpected.entries) {
+      tasks.add(
+        _retryVerifyPublicAsset(
+          url: entry.value.$3,
+          exactBytes: entry.value.$1,
+          expectedSha256: entry.value.$2,
           allowRange: true,
         ),
       );
@@ -264,6 +422,14 @@ Future<void> recoverLatest({
         throw AutomationException('${entry.key} changed before promotion.');
       }
     }
+    if (routingTag != null) {
+      await _validateRecoveryRoutingRelease(
+        github,
+        tag: routingTag,
+        target: target,
+        expected: routingExpected,
+      );
+    }
     final promoted = await github.promoteLatest(release.id);
     if (promoted.id != release.id ||
         promoted.tagName != tag ||
@@ -283,6 +449,214 @@ Future<void> recoverLatest({
     );
   } finally {
     github.close();
+  }
+}
+
+String mapVersionForRecoveryTag(String tag) {
+  final match = RegExp(r'^maps-(\d{4}\.\d{2}\.\d+)$').firstMatch(tag);
+  if (match == null) {
+    throw const AutomationException('Recovery map release tag is invalid.');
+  }
+  return match.group(1)!;
+}
+
+void validateRecoveryMapDescriptor(
+  Map<String, Object?> region, {
+  required String id,
+  required String repository,
+  required String tag,
+  required String version,
+  required DateTime generatedAt,
+  String? expectedSourceId,
+}) {
+  final file = string(region['file'], '$id.file');
+  final name = string(region['name'], '$id.name');
+  final sourceId = string(region['sourceId'], '$id.sourceId');
+  final attribution = string(region['attribution'], '$id.attribution');
+  final attributionUrl = httpsUri(
+    region['attributionUrl'],
+    '$id.attributionUrl',
+  );
+  final downloadUrl = httpsUri(region['downloadUrl'], '$id.downloadUrl');
+  final mapBytes = integer(region['exactBytes'], '$id.exactBytes');
+  final tileCount = integer(region['tileCount'], '$id.tileCount');
+  final minZoom = integer(region['minZoom'], '$id.minZoom');
+  final maxZoom = integer(region['maxZoom'], '$id.maxZoom');
+  final bounds = object(region['bounds'], '$id.bounds');
+  final west = number(bounds['west'], '$id.bounds.west');
+  final south = number(bounds['south'], '$id.bounds.south');
+  final east = number(bounds['east'], '$id.bounds.east');
+  final north = number(bounds['north'], '$id.bounds.north');
+  final segments = downloadUrl.pathSegments;
+  final expectedFile = '$id-$version.pmtiles';
+  if (!safeAssetPattern.hasMatch(file) ||
+      file != expectedFile ||
+      region['version'] != version ||
+      region['updatedAt'] != generatedAt.toIso8601String() ||
+      region['archiveFormat'] != 'pmtiles' ||
+      region['format'] != 'mvt' ||
+      region['tileCompression'] != 'gzip' ||
+      region['style'] != 'road' ||
+      name.length > 512 ||
+      sourceId.length > 128 ||
+      (expectedSourceId != null && sourceId != expectedSourceId) ||
+      attribution.length > 512 ||
+      attributionUrl.toString() != 'https://www.openstreetmap.org/copyright' ||
+      mapBytes <= 0 ||
+      mapBytes > maximumOfflineMapAssetBytes ||
+      tileCount <= 0 ||
+      minZoom < 0 ||
+      maxZoom < minZoom ||
+      maxZoom > 15 ||
+      west < -180 ||
+      west > 180 ||
+      east < -180 ||
+      east > 180 ||
+      west >= east ||
+      south < -85.0511287 ||
+      south > 85.0511287 ||
+      north < -85.0511287 ||
+      north > 85.0511287 ||
+      south >= north ||
+      !sha256Pattern.hasMatch(string(region['sha256'], '$id.sha256')) ||
+      downloadUrl.host != 'github.com' ||
+      downloadUrl.hasPort ||
+      downloadUrl.query.isNotEmpty ||
+      downloadUrl.fragment.isNotEmpty ||
+      segments.length != 6 ||
+      '${segments[0]}/${segments[1]}' != repository ||
+      segments[2] != 'releases' ||
+      segments[3] != 'download' ||
+      segments[4] != tag ||
+      segments[5] != file) {
+    throw AutomationException('$id map descriptor is invalid.');
+  }
+  _validateRecoveryNames(region['names'], id: id);
+  _validateRecoveryHierarchy(region, id: id);
+}
+
+void _validateRecoveryNames(Object? value, {required String id}) {
+  if (value == null) return;
+  final names = object(value, '$id.names');
+  for (final entry in names.entries) {
+    if (!RegExp(r'^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$').hasMatch(entry.key) ||
+        entry.value is! String ||
+        (entry.value as String).trim().isEmpty ||
+        (entry.value as String).length > 512) {
+      throw AutomationException('$id localized names are invalid.');
+    }
+  }
+}
+
+void _validateRecoveryHierarchy(
+  Map<String, Object?> region, {
+  required String id,
+}) {
+  final country = region['countryCode'];
+  final subdivision = region['subdivisionCode'];
+  final group = region['group'];
+  final continent = region['continent'];
+  if ((country != null &&
+          (country is! String || !RegExp(r'^[A-Z]{2}$').hasMatch(country))) ||
+      (subdivision != null &&
+          (country is! String ||
+              subdivision is! String ||
+              !RegExp(
+                '^${RegExp.escape(country)}-[A-Z0-9]{1,3}\$',
+              ).hasMatch(subdivision))) ||
+      (group != null &&
+          (group is! String ||
+              !RegExp(r'^[a-z0-9][a-z0-9._-]{0,62}$').hasMatch(group))) ||
+      (continent != null &&
+          (continent is! String ||
+              !const <String>{
+                'AF',
+                'AN',
+                'AS',
+                'EU',
+                'NA',
+                'OC',
+                'SA',
+              }.contains(continent)))) {
+    throw AutomationException('$id geographic hierarchy is invalid.');
+  }
+}
+
+bool _provenanceRoutingMatches(
+  Map<String, Object?> provenance,
+  Map<String, Object?> catalog,
+) {
+  final routing = catalog['routing'];
+  if (routing == null) {
+    return provenance['routingFile'] == null &&
+        provenance['routingOutputSha256'] == null &&
+        provenance['routingOutputBytes'] == null &&
+        provenance['routingSourceSha256'] == null &&
+        provenance['routingSourceInput'] == null;
+  }
+  final descriptor = object(routing, 'catalog.routing');
+  return provenance['routingFile'] == descriptor['file'] &&
+      provenance['routingOutputSha256'] == descriptor['sha256'] &&
+      provenance['routingOutputBytes'] == descriptor['exactBytes'] &&
+      provenance['routingSourceSha256'] == descriptor['sourceSha256'] &&
+      deepJsonEquals(
+        provenance['routingSourceInput'],
+        descriptor['sourceInput'],
+      );
+}
+
+bool _validRoutingSourceInput(Object? value) {
+  try {
+    final source = object(value, 'routing.sourceInput');
+    final parsed = ValhallaRoutingSource.fromJson(
+      source,
+      'routing.sourceInput',
+    );
+    return parsed.url.host == 'download.geofabrik.de' &&
+        parsed.url.query.isEmpty &&
+        parsed.url.fragment.isEmpty &&
+        RegExp(r'-\d{6}\.osm\.pbf$').hasMatch(parsed.url.path);
+  } on Object {
+    return false;
+  }
+}
+
+Future<void> _validateRecoveryRoutingRelease(
+  GitHubReleaseClient github, {
+  required String tag,
+  required String target,
+  required Map<String, (int, String, Uri, String)> expected,
+}) async {
+  final release = await github.releaseByTag(tag);
+  if (release == null ||
+      release.draft ||
+      release.prerelease ||
+      release.tagName != tag ||
+      release.targetCommitish.toLowerCase() != target.toLowerCase()) {
+    throw const AutomationException(
+      'Recovery routing release identity is invalid.',
+    );
+  }
+  final assets = await github.listAssets(release.id);
+  if (assets.length != expected.length ||
+      assets.map((asset) => asset.name).toSet().length != expected.length) {
+    throw const AutomationException(
+      'Recovery routing release asset set is not exact.',
+    );
+  }
+  for (final entry in expected.entries) {
+    final matches = assets.where((asset) => asset.name == entry.key).toList();
+    if (matches.length != 1 ||
+        !assetMatches(
+          matches.single,
+          exactBytes: entry.value.$1,
+          sha256: entry.value.$2,
+        ) ||
+        matches.single.label != routingAssetProvenanceLabel(entry.value.$4)) {
+      throw AutomationException(
+        '${entry.key} failed routing recovery verification.',
+      );
+    }
   }
 }
 

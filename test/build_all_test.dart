@@ -6,6 +6,7 @@ import 'package:test/test.dart';
 
 import '../tool/offline_maps/build_all.dart';
 import '../tool/offline_maps/build_region.dart';
+import '../tool/offline_maps/build_routing.dart';
 
 void main() {
   test('CLI defaults keep all generated state below the build directory', () {
@@ -57,6 +58,37 @@ void main() {
     final first = (json['regions']! as List).first as Map<String, Object?>;
     (first['extract']! as Map<String, Object?>)['geoJson'] =
         'regions/x.geojson';
+    expect(
+      () => OfflineMapBuildManifest.fromJson(json),
+      throwsA(isA<OfflineMapBuildException>()),
+    );
+  });
+
+  test('requires one coordinated routing release and version', () {
+    final json = _manifestJson();
+    json['routingBuilder'] = <String, Object?>{
+      'dockerExecutable': 'docker',
+      'image': supportedValhallaBuilderImage,
+      'version': supportedValhallaGraphVersion,
+      'buildConcurrency': 2,
+    };
+    final regions = (json['regions']! as List).cast<Map<String, Object?>>();
+    for (var index = 0; index < regions.length; index++) {
+      final version = index == 0 ? '2026.08.1' : '2026.08.2';
+      regions[index]['routingBuild'] = <String, Object?>{
+        'file': '${regions[index]['id']}-routing-$version.vtiles.tar',
+        'releaseTag': 'routing-$version',
+        'version': version,
+        'updatedAt': '2026-08-11T20:00:00Z',
+        'source': <String, Object?>{
+          'url':
+              'https://download.example.test/${regions[index]['id']}.osm.pbf',
+          'exactBytes': 12,
+          'sha256': '${index + 1}' * 64,
+        },
+      };
+    }
+
     expect(
       () => OfflineMapBuildManifest.fromJson(json),
       throwsA(isA<OfflineMapBuildException>()),
@@ -177,6 +209,88 @@ void main() {
       );
     },
   );
+
+  test('adds an optional routing pack and combined regional size', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'pmtiles-routing-build-all-',
+    );
+    addTearDown(() => temporary.delete(recursive: true));
+    final json = _manifestJson();
+    json['routingBuilder'] = <String, Object?>{
+      'dockerExecutable': 'docker',
+      'image': supportedValhallaBuilderImage,
+      'version': supportedValhallaGraphVersion,
+      'buildConcurrency': 2,
+    };
+    final first = (json['regions']! as List).first as Map<String, Object?>;
+    first['routingBuild'] = <String, Object?>{
+      'file': 'california-road-routing-2026.08.1.vtiles.tar',
+      'releaseTag': 'routing-2026.08.1',
+      'version': '2026.08.1',
+      'updatedAt': '2026-08-11T20:00:00Z',
+      'source': <String, Object?>{
+        'url': 'https://download.example.test/california.osm.pbf',
+        'exactBytes': 12,
+        'sha256': 'b' * 64,
+      },
+    };
+    final manifestFile = File('${temporary.path}/manifest.json');
+    await manifestFile.writeAsString(jsonEncode(json));
+    final manifest = OfflineMapBuildManifest.fromJson(json);
+
+    await buildAllOfflineMaps(
+      manifest,
+      manifestFile: manifestFile,
+      outputDirectory: Directory('${temporary.path}/output'),
+      stagingDirectory: Directory('${temporary.path}/staging'),
+      cacheDirectory: Directory('${temporary.path}/cache'),
+      sourceValidator: (_) async {},
+      regionBuilder: (request) async {
+        await request.output.parent.create(recursive: true);
+        await request.output.writeAsBytes(utf8.encode('map:${request.id}'));
+        return _inspection(request);
+      },
+      routingRegionBuilder: (request) async {
+        await request.output.writeAsBytes(List<int>.filled(24, 9));
+        return request.output;
+      },
+      runner: _VersionRunner(),
+    );
+
+    final catalog =
+        jsonDecode(
+              await File(
+                '${temporary.path}/output/catalog.json',
+              ).readAsString(),
+            )
+            as Map<String, Object?>;
+    final regions = (catalog['regions']! as List).cast<Map>();
+    final california = regions.singleWhere(
+      (region) => region['id'] == 'california-road',
+    );
+    expect(california['routingAvailable'], isTrue);
+    expect(
+      california['combinedExactBytes'],
+      (california['exactBytes']! as int) + 24,
+    );
+    final routing = california['routing']! as Map;
+    expect(routing['format'], 'valhalla-tar');
+    expect(routing['engine'], routingEngine);
+    expect(routing['engineVersion'], supportedValhallaGraphVersion);
+    expect(routing['exactBytes'], 24);
+    expect(routing['modes'], supportedRoutingModes);
+    expect(
+      File(
+        '${temporary.path}/output/'
+        'california-road-routing-2026.08.1.vtiles.tar',
+      ).existsSync(),
+      isTrue,
+    );
+    expect(
+      await File('${temporary.path}/output/SHA256SUMS').readAsLines(),
+      hasLength(6),
+    );
+  });
 }
 
 Map<String, Object?> _manifestJson() => <String, Object?>{
