@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:test/test.dart';
 
+import '../tool/offline_maps/build_region.dart';
+import '../tool/offline_maps/build_shard.dart';
 import '../tool/offline_maps/finalize_release.dart';
 import '../tool/offline_maps/github_release_api.dart';
 import '../tool/offline_maps/prepare_release.dart';
@@ -159,6 +161,72 @@ void main() {
       ),
       isTrue,
     );
+  });
+
+  test('catalog records retain configured bounds after inspection', () {
+    const configuredBounds = <String, Object?>{
+      'west': -10.0,
+      'south': -8.534961,
+      'east': 10.0,
+      'north': 8.0,
+    };
+    const inspectedBounds = PmtilesBounds(
+      west: -10.0,
+      south: -8.5349609,
+      east: 10.0,
+      north: 8.0,
+    );
+    const inspection = PmtilesArchiveInspection(
+      specVersion: 3,
+      tileType: 'mvt',
+      tileCompression: 'gzip',
+      minZoom: 5,
+      maxZoom: 12,
+      bounds: inspectedBounds,
+      addressedTiles: 1,
+      clustered: true,
+      metadata: <String, Object?>{
+        'version': '4.15.1',
+        'type': 'baselayer',
+        'vector_layers': <Object?>[
+          <String, Object?>{'id': 'roads'},
+        ],
+      },
+    );
+    validatePmtilesInspection(
+      inspection,
+      PmtilesRegionBuildRequest(
+        sourceUrl: Uri.https('build.protomaps.com', '/20260811.pmtiles'),
+        output: File('unused.pmtiles'),
+        id: 'example-road',
+        bounds: const PmtilesBounds(
+          west: -10.0,
+          south: -8.534961,
+          east: 10.0,
+          north: 8.0,
+        ),
+        minZoom: 5,
+        maxZoom: 12,
+        tilesetVersion: '4.15.1',
+        pmtilesCommand: 'pmtiles',
+        downloadThreads: 4,
+      ),
+    );
+    final record = catalogRecord(
+      <String, Object?>{
+        'file': 'example-road-2026.08.1.pmtiles',
+        'id': 'example-road',
+        'extract': <String, Object?>{'bounds': configuredBounds},
+      },
+      tag: 'maps-2026.08.1',
+      repository: 'virbula/offlinemaps',
+      inspection: inspection,
+      exactBytes: 1,
+      digest: 'a' * 64,
+    );
+
+    expect(record['bounds'], configuredBounds);
+    expect(object(record['bounds'], 'record.bounds')['south'], -8.534961);
   });
 
   test('workflow pins actions and never artifacts PMTiles', () async {

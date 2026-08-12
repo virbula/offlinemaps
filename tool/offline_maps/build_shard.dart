@@ -381,7 +381,7 @@ Map<String, Object?> catalogRecord(
     'continent',
   ])
     if (region.containsKey(key)) key: region[key],
-  'bounds': inspection.bounds.toJson(),
+  'bounds': _configuredCatalogBounds(region),
   'archiveFormat': 'pmtiles',
   'format': 'mvt',
   'tileCompression': inspection.tileCompression,
@@ -393,3 +393,9 @@ Map<String, Object?> catalogRecord(
     '/$repository/releases/download/$tag/${string(region['file'], 'file')}',
   ).toString(),
 };
+
+Map<String, Object?> _configuredCatalogBounds(Map<String, Object?> region) {
+  final id = string(region['id'], 'region.id');
+  final extract = object(region['extract'], '$id.extract');
+  return object(extract['bounds'] ?? extract['bbox'], '$id.extract.bounds');
+}
