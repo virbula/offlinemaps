@@ -121,7 +121,7 @@ jobs:
           matrix="$(jq -c . build/plan/matrix.json)"
           test "${#matrix}" -lt 900000
           jq -e '.include | length <= 1' build/plan/matrix.json >/dev/null
-          jq -e 'all(.include[]; (.regionIds | length >= 1 and length <= 3) and (.maximumSourceExactBytes | type == "number" and . > 0) and (.aggregateSourceExactBytes | type == "number" and . >= .maximumSourceExactBytes))' build/plan/matrix.json >/dev/null
+          jq -e 'all(.include[]; . as $entry | (.regionIds | length >= 1 and length <= 3) and (.maximumSourceExactBytes | type == "number" and . > 0) and (.aggregateSourceExactBytes | type == "number") and ($entry.aggregateSourceExactBytes >= $entry.maximumSourceExactBytes))' build/plan/matrix.json >/dev/null
           jq -e '.noOp | type == "boolean"' build/plan/release.json >/dev/null
           jq -e '.requiresBuild | type == "boolean"' build/plan/release.json >/dev/null
           no_op="$(jq -r '.noOp' build/plan/release.json)"

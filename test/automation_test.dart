@@ -493,6 +493,47 @@ void main() {
     }
   });
 
+  test(
+    'routing workflow validates matrix byte bounds in object context',
+    () async {
+      const filter =
+          r'all(.include[]; . as $entry | (.regionIds | length >= 1 and length <= 3) and (.maximumSourceExactBytes | type == "number" and . > 0) and (.aggregateSourceExactBytes | type == "number") and ($entry.aggregateSourceExactBytes >= $entry.maximumSourceExactBytes))';
+      final workflow = await File(
+        '.github/workflows/routing-backfill.yml',
+      ).readAsString();
+      expect(
+        workflow,
+        contains("jq -e '$filter' build/plan/matrix.json >/dev/null"),
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'routing-matrix-validation-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      Future<ProcessResult> validate({
+        required int maximum,
+        required int aggregate,
+      }) async {
+        final file = File('${directory.path}/matrix.json');
+        await file.writeAsString(
+          jsonEncode(<String, Object?>{
+            'include': <Object?>[
+              <String, Object?>{
+                'shard': '000',
+                'regionIds': <String>['ad-road', 'fr-road'],
+                'maximumSourceExactBytes': maximum,
+                'aggregateSourceExactBytes': aggregate,
+              },
+            ],
+          }),
+        );
+        return Process.run('jq', <String>['-e', filter, file.path]);
+      }
+
+      expect((await validate(maximum: 80, aggregate: 120)).exitCode, 0);
+      expect((await validate(maximum: 120, aggregate: 80)).exitCode, isNot(0));
+    },
+  );
+
   test('local plans do not require or pull the Valhalla image', () async {
     final makefile = await File('Makefile').readAsString();
     expect(makefile, contains('*" --dry-run "*)'));
