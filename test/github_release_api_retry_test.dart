@@ -164,6 +164,125 @@ void main() {
     expect(sent!['body'], contains('ODbL'));
   });
 
+  test('creates and verifies a missing lightweight release tag', () async {
+    final requests = <(String, String, Map<String, Object?>?)>[];
+    final target = 'a' * 40;
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        requests.add((method, uri.path, jsonBody));
+        if (method == 'GET') return (statusCode: 404, body: '{}');
+        return (
+          statusCode: 201,
+          body: jsonEncode(_tagRefJson('routing-2026.08.1', target: target)),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    final created = await client.ensureLightweightTag(
+      tag: 'routing-2026.08.1',
+      target: target,
+      createIfMissing: true,
+    );
+
+    expect(created.ref, 'refs/tags/routing-2026.08.1');
+    expect(created.objectType, 'commit');
+    expect(created.objectSha, target);
+    expect(requests.map((request) => request.$1), <String>['GET', 'POST']);
+    expect(requests.last.$2, '/repos/virbula/offlinemaps/git/refs');
+    expect(requests.last.$3, <String, Object?>{
+      'ref': 'refs/tags/routing-2026.08.1',
+      'sha': target,
+    });
+  });
+
+  test('reconciles an exact tag after an ambiguous create failure', () async {
+    final target = 'a' * 40;
+    var getCalls = 0;
+    final methods = <String>[];
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        methods.add(method);
+        if (method == 'GET' && getCalls++ == 0) {
+          return (statusCode: 404, body: '{}');
+        }
+        if (method == 'POST') {
+          return (statusCode: 422, body: 'Reference already exists');
+        }
+        return (
+          statusCode: 200,
+          body: jsonEncode(_tagRefJson('catalog-2026.08.1', target: target)),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    final reconciled = await client.ensureLightweightTag(
+      tag: 'catalog-2026.08.1',
+      target: target,
+      createIfMissing: true,
+    );
+
+    expect(reconciled.objectSha, target);
+    expect(methods, <String>['GET', 'POST', 'GET']);
+  });
+
+  test('tag binding fails closed on a mismatched or annotated ref', () async {
+    for (final value in <Map<String, Object?>>[
+      _tagRefJson('routing-2026.08.1', target: 'b' * 40),
+      _tagRefJson('routing-2026.08.1', target: 'a' * 40, type: 'tag'),
+      _tagRefJson('catalog-2026.08.1', target: 'a' * 40),
+    ]) {
+      var posted = false;
+      final client = GitHubReleaseClient(
+        repository: 'virbula/offlinemaps',
+        token: 'test-token',
+        requestExecutor: (method, uri, jsonBody) async {
+          if (method == 'POST') posted = true;
+          return (statusCode: 200, body: jsonEncode(value));
+        },
+      );
+      addTearDown(client.close);
+
+      await expectLater(
+        client.ensureLightweightTag(
+          tag: 'routing-2026.08.1',
+          target: 'a' * 40,
+          createIfMissing: true,
+        ),
+        throwsA(isA<AutomationException>()),
+      );
+      expect(posted, isFalse);
+    }
+  });
+
+  test('resumed release cannot create a missing non-head tag', () async {
+    var posted = false;
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        if (method == 'POST') posted = true;
+        return (statusCode: 404, body: '{}');
+      },
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.ensureLightweightTag(
+        tag: 'routing-2026.08.1',
+        target: 'a' * 40,
+        createIfMissing: false,
+      ),
+      throwsA(isA<AutomationException>()),
+    );
+    expect(posted, isFalse);
+  });
+
   test('asset pagination accepts exactly 1000 and probes page 11', () async {
     final pages = <int>[];
     final client = GitHubReleaseClient(
@@ -289,4 +408,13 @@ const _releaseJson = <String, Object?>{
   'target_commitish': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   'draft': true,
   'prerelease': false,
+};
+
+Map<String, Object?> _tagRefJson(
+  String tag, {
+  required String target,
+  String type = 'commit',
+}) => <String, Object?>{
+  'ref': 'refs/tags/$tag',
+  'object': <String, Object?>{'sha': target, 'type': type},
 };

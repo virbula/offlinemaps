@@ -600,6 +600,169 @@ void main() {
   });
 
   test(
+    'new routing releases bind both tags to the trusted current head',
+    () async {
+      final requests = <(String, String, Map<String, Object?>?)>[];
+      final target = 'a' * 40;
+      final client = GitHubReleaseClient(
+        repository: 'virbula/offlinemaps',
+        token: 'test-token',
+        requestExecutor: (method, uri, jsonBody) async {
+          requests.add((method, uri.path, jsonBody));
+          if (method == 'GET') return (statusCode: 404, body: '{}');
+          final ref = jsonBody!['ref']! as String;
+          return (
+            statusCode: 201,
+            body: jsonEncode(<String, Object?>{
+              'ref': ref,
+              'object': <String, Object?>{
+                'sha': jsonBody['sha']! as String,
+                'type': 'commit',
+              },
+            }),
+          );
+        },
+      );
+      addTearDown(client.close);
+
+      final bound = await bindRoutingReleaseTags(
+        github: client,
+        routingRelease: null,
+        catalogRelease: null,
+        routingTag: 'routing-2026.08.1',
+        catalogTag: 'catalog-2026.08.1',
+        currentTarget: target,
+      );
+
+      expect(bound, target);
+      expect(requests.map((request) => request.$1), <String>[
+        'GET',
+        'POST',
+        'GET',
+        'POST',
+      ]);
+      final created = requests.where((request) => request.$1 == 'POST');
+      expect(created.map((request) => request.$3!['ref']), <String>[
+        'refs/tags/routing-2026.08.1',
+        'refs/tags/catalog-2026.08.1',
+      ]);
+      expect(
+        created.map((request) => request.$3!['sha']),
+        everyElement(target),
+      );
+      final prepare = await File(
+        'tool/offline_maps/prepare_routing_backfill.dart',
+      ).readAsString();
+      final newPairBranch = prepare.indexOf('if (catalogRelease == null)');
+      final bind = prepare.indexOf(
+        'await bindRoutingReleaseTags(',
+        newPairBranch,
+      );
+      final create = prepare.indexOf(
+        'routingRelease = await client.createDraft(',
+        newPairBranch,
+      );
+      expect(newPairBranch, greaterThanOrEqualTo(0));
+      expect(bind, greaterThan(newPairBranch));
+      expect(create, greaterThan(bind));
+    },
+  );
+
+  test(
+    'current plan verifies its old release target instead of the new head',
+    () async {
+      final releaseTarget = '5eec19b23e2bbb779570b36835ce989568b0480a';
+      final currentHead = '1f482214ff96eced976677ce7bf14bc6a2c9be13';
+      final methods = <String>[];
+      final client = GitHubReleaseClient(
+        repository: 'virbula/offlinemaps',
+        token: 'test-token',
+        requestExecutor: (method, uri, jsonBody) async {
+          methods.add(method);
+          final tag = uri.path.endsWith('/routing-2026.08.1')
+              ? 'routing-2026.08.1'
+              : 'catalog-2026.08.1';
+          return (
+            statusCode: 200,
+            body: jsonEncode(<String, Object?>{
+              'ref': 'refs/tags/$tag',
+              'object': <String, Object?>{
+                'sha': releaseTarget,
+                'type': 'commit',
+              },
+            }),
+          );
+        },
+      );
+      addTearDown(client.close);
+      GitHubRelease release(int id, String tag) => GitHubRelease(
+        id: id,
+        tagName: tag,
+        targetCommitish: releaseTarget,
+        draft: true,
+        prerelease: false,
+      );
+
+      final bound = await bindRoutingReleaseTags(
+        github: client,
+        routingRelease: release(369456104, 'routing-2026.08.1'),
+        catalogRelease: release(369456273, 'catalog-2026.08.1'),
+        routingTag: 'routing-2026.08.1',
+        catalogTag: 'catalog-2026.08.1',
+        currentTarget: currentHead,
+      );
+
+      expect(bound, releaseTarget);
+      expect(methods, <String>['GET', 'GET']);
+    },
+  );
+
+  test('tag binding resumes after only the first ref was created', () async {
+    final target = 'a' * 40;
+    final methods = <String>[];
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        methods.add(method);
+        if (method == 'GET' && uri.path.endsWith('/routing-2026.08.1')) {
+          return (
+            statusCode: 200,
+            body: jsonEncode(<String, Object?>{
+              'ref': 'refs/tags/routing-2026.08.1',
+              'object': <String, Object?>{'sha': target, 'type': 'commit'},
+            }),
+          );
+        }
+        if (method == 'GET') return (statusCode: 404, body: '{}');
+        return (
+          statusCode: 201,
+          body: jsonEncode(<String, Object?>{
+            'ref': jsonBody!['ref']! as String,
+            'object': <String, Object?>{
+              'sha': jsonBody['sha']! as String,
+              'type': 'commit',
+            },
+          }),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    final bound = await bindRoutingReleaseTags(
+      github: client,
+      routingRelease: null,
+      catalogRelease: null,
+      routingTag: 'routing-2026.08.1',
+      catalogTag: 'catalog-2026.08.1',
+      currentTarget: target,
+    );
+
+    expect(bound, target);
+    expect(methods, <String>['GET', 'GET', 'POST']);
+  });
+
+  test(
     'catalog-only recovery creates routing at the immutable catalog target',
     () async {
       final requests = <(String, String, Map<String, Object?>?)>[];
@@ -747,6 +910,31 @@ void main() {
       expect(prepare, isNot(contains('retargetEmptyDraft')));
     },
   );
+
+  test('final publication rechecks both immutable lightweight tags', () async {
+    final source = await File(
+      'tool/offline_maps/finalize_routing_backfill.dart',
+    ).readAsString();
+    expect(
+      RegExp(r'await github\.ensureLightweightTag\(').allMatches(source),
+      hasLength(2),
+    );
+    expect(RegExp(r'createIfMissing: false').allMatches(source), hasLength(2));
+    expect(
+      source.indexOf(
+        'tag: routingTag,',
+        source.indexOf('if (routingRelease.draft)'),
+      ),
+      lessThan(source.indexOf('github.publishNotLatest(routingReleaseId)')),
+    );
+    expect(
+      source.indexOf(
+        'tag: catalogTag,',
+        source.indexOf('if (catalogRelease.draft)'),
+      ),
+      lessThan(source.indexOf('github.publishNotLatest(catalogReleaseId)')),
+    );
+  });
 
   test('routing sync recognizes only its exact prior atomic commit', () {
     bool validate({

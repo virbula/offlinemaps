@@ -117,6 +117,16 @@ retargeted. Once a plan exists, its original target and bytes are authoritative.
 If creation was interrupted after an empty catalog draft was created, recovery
 may create only the missing routing draft at that catalog's exact target.
 
+Before either coordinated draft is created, preparation creates and verifies
+exact lightweight `routing-<version>` and `catalog-<version>` tag refs at the
+trusted workflow head. Creating the two refs is idempotent: an interrupted run
+accepts only the already-created exact commit ref before creating the other.
+Continuation runs verify both refs against the coordinated releases' original
+shared target rather than the newer workflow head. A missing non-head ref, a
+mismatched commit, or an annotated tag fails closed before release mutation.
+The finalizer verifies each exact ref again immediately before publishing its
+draft, without creating a missing tag during finalization.
+
 The routing release and joined catalog can resume from these states:
 
 - routing draft / catalog draft;

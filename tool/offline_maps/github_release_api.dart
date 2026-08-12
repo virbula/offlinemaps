@@ -84,6 +84,28 @@ class GitHubRelease {
   final bool prerelease;
 }
 
+class GitHubTagRef {
+  const GitHubTagRef({
+    required this.ref,
+    required this.objectSha,
+    required this.objectType,
+  });
+
+  factory GitHubTagRef.fromJson(Object? value) {
+    final map = object(value, 'GitHub tag ref');
+    final target = object(map['object'], 'GitHub tag ref.object');
+    return GitHubTagRef(
+      ref: string(map['ref'], 'GitHub tag ref.ref'),
+      objectSha: string(target['sha'], 'GitHub tag ref.object.sha'),
+      objectType: string(target['type'], 'GitHub tag ref.object.type'),
+    );
+  }
+
+  final String ref;
+  final String objectSha;
+  final String objectType;
+}
+
 class GitHubReleaseClient {
   GitHubReleaseClient({
     required this.repository,
@@ -104,6 +126,61 @@ class GitHubReleaseClient {
   static const int _maximumGetAttempts = 5;
 
   void close() => _client.close(force: true);
+
+  Future<GitHubTagRef?> tagRef(String tag) async {
+    _validateReleaseTag(tag);
+    final response = await _request(
+      'GET',
+      Uri.https('api.github.com', '/repos/$repository/git/ref/tags/$tag'),
+      accepted: const <int>{200, 404},
+    );
+    return response.statusCode == 404
+        ? null
+        : GitHubTagRef.fromJson(jsonDecode(response.body));
+  }
+
+  Future<GitHubTagRef> ensureLightweightTag({
+    required String tag,
+    required String target,
+    required bool createIfMissing,
+  }) async {
+    _validateReleaseTag(tag);
+    if (!RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
+      throw const AutomationException(
+        'GitHub tag target must be a full lowercase commit SHA.',
+      );
+    }
+    final existing = await tagRef(tag);
+    if (existing != null) {
+      _validateLightweightTag(existing, tag: tag, target: target);
+      return existing;
+    }
+    if (!createIfMissing) {
+      throw AutomationException(
+        'Required lightweight tag refs/tags/$tag is missing.',
+      );
+    }
+    late final _Response response;
+    try {
+      response = await _request(
+        'POST',
+        Uri.https('api.github.com', '/repos/$repository/git/refs'),
+        jsonBody: <String, Object?>{'ref': 'refs/tags/$tag', 'sha': target},
+        accepted: const <int>{201},
+      );
+    } on AutomationException {
+      // A POST can create the ref even if its response is lost, and another
+      // serialized retry may observe GitHub's "already exists" response.
+      // Reconcile only an exact lightweight ref; otherwise fail closed.
+      final reconciled = await tagRef(tag);
+      if (reconciled == null) rethrow;
+      _validateLightweightTag(reconciled, tag: tag, target: target);
+      return reconciled;
+    }
+    final created = GitHubTagRef.fromJson(jsonDecode(response.body));
+    _validateLightweightTag(created, tag: tag, target: target);
+    return created;
+  }
 
   Future<GitHubRelease?> releaseByTag(String tag) async {
     final response = await _request(
@@ -528,6 +605,28 @@ class GitHubReleaseClient {
       ..set('X-GitHub-Api-Version', apiVersion)
       ..set(HttpHeaders.userAgentHeader, 'virbula-offlinemaps-actions');
     return request;
+  }
+}
+
+void _validateReleaseTag(String tag) {
+  if (!RegExp(
+    r'^(routing|catalog)-[0-9]{4}\.[0-9]{2}\.[0-9]{1,2}$',
+  ).hasMatch(tag)) {
+    throw const AutomationException('GitHub release tag is invalid.');
+  }
+}
+
+void _validateLightweightTag(
+  GitHubTagRef value, {
+  required String tag,
+  required String target,
+}) {
+  if (value.ref != 'refs/tags/$tag' ||
+      value.objectType != 'commit' ||
+      value.objectSha.toLowerCase() != target) {
+    throw AutomationException(
+      'GitHub tag refs/tags/$tag is not the expected lightweight commit ref.',
+    );
   }
 }
 

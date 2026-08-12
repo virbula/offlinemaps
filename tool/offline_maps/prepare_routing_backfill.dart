@@ -147,16 +147,18 @@ Future<void> prepareRoutingBackfill(
       github.close();
       throw AutomationException('$mapTag is not a public map release.');
     }
+    if (routingRelease != null || catalogRelease != null) {
+      await bindRoutingReleaseTags(
+        github: github,
+        routingRelease: routingRelease,
+        catalogRelease: catalogRelease,
+        routingTag: routingTag,
+        catalogTag: catalogTag,
+        currentTarget: options.target,
+      );
+    }
     if (routingRelease != null && catalogRelease == null) {
       final target = routingRelease.targetCommitish.toLowerCase();
-      if (routingRelease.tagName != routingTag ||
-          routingRelease.prerelease ||
-          !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
-        github.close();
-        throw const AutomationException(
-          'The unpaired routing release is not safely recoverable.',
-        );
-      }
       catalogRelease = await github.createDraft(
         tag: catalogTag,
         target: target,
@@ -302,6 +304,14 @@ Future<void> prepareRoutingBackfill(
       mapReleaseId = mapRelease.id;
       if (routingRelease == null) {
         if (catalogRelease == null) {
+          await bindRoutingReleaseTags(
+            github: client,
+            routingRelease: null,
+            catalogRelease: null,
+            routingTag: routingTag,
+            catalogTag: catalogTag,
+            currentTarget: options.target,
+          );
           routingRelease = await client.createDraft(
             tag: routingTag,
             target: options.target,
@@ -663,6 +673,20 @@ void validateRecoverableRoutingReleasePair({
   }
 }
 
+void validateRecoverableRoutingOnlyRelease({
+  required GitHubRelease routingRelease,
+  required String routingTag,
+}) {
+  final target = routingRelease.targetCommitish.toLowerCase();
+  if (routingRelease.tagName != routingTag ||
+      routingRelease.prerelease ||
+      !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
+    throw const AutomationException(
+      'The unpaired routing release is not safely recoverable.',
+    );
+  }
+}
+
 void validateRecoverableCatalogOnlyRelease({
   required GitHubRelease catalogRelease,
   required String catalogTag,
@@ -676,6 +700,57 @@ void validateRecoverableCatalogOnlyRelease({
       'The catalog-only draft is not safely recoverable.',
     );
   }
+}
+
+Future<String> bindRoutingReleaseTags({
+  required GitHubReleaseClient github,
+  required GitHubRelease? routingRelease,
+  required GitHubRelease? catalogRelease,
+  required String routingTag,
+  required String catalogTag,
+  required String currentTarget,
+}) async {
+  if (!RegExp(r'^[a-f0-9]{40}$').hasMatch(currentTarget)) {
+    throw const AutomationException(
+      'Current routing tag target must be a full lowercase commit SHA.',
+    );
+  }
+  late final String target;
+  if (routingRelease == null && catalogRelease == null) {
+    target = currentTarget;
+  } else if (routingRelease != null && catalogRelease != null) {
+    validateRecoverableRoutingReleasePair(
+      routingRelease: routingRelease,
+      catalogRelease: catalogRelease,
+      routingTag: routingTag,
+      catalogTag: catalogTag,
+    );
+    target = routingRelease.targetCommitish.toLowerCase();
+  } else if (routingRelease != null) {
+    validateRecoverableRoutingOnlyRelease(
+      routingRelease: routingRelease,
+      routingTag: routingTag,
+    );
+    target = routingRelease.targetCommitish.toLowerCase();
+  } else {
+    validateRecoverableCatalogOnlyRelease(
+      catalogRelease: catalogRelease!,
+      catalogTag: catalogTag,
+    );
+    target = catalogRelease.targetCommitish.toLowerCase();
+  }
+  final createIfMissing = target == currentTarget;
+  await github.ensureLightweightTag(
+    tag: routingTag,
+    target: target,
+    createIfMissing: createIfMissing,
+  );
+  await github.ensureLightweightTag(
+    tag: catalogTag,
+    target: target,
+    createIfMissing: createIfMissing,
+  );
+  return target;
 }
 
 Future<({GitHubRelease routingRelease, GitHubRelease catalogRelease})>

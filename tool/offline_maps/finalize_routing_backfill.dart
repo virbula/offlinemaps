@@ -299,6 +299,11 @@ Future<void> finalizeRoutingBackfill(
     }
 
     if (routingRelease.draft) {
+      await github.ensureLightweightTag(
+        tag: routingTag,
+        target: target,
+        createIfMissing: false,
+      );
       _validateDraft(
         await github.releaseById(routingReleaseId),
         tag: routingTag,
@@ -325,6 +330,11 @@ Future<void> finalizeRoutingBackfill(
 
     catalogRelease = await github.releaseById(catalogReleaseId);
     if (catalogRelease.draft) {
+      await github.ensureLightweightTag(
+        tag: catalogTag,
+        target: target,
+        createIfMissing: false,
+      );
       _validateDraft(catalogRelease, tag: catalogTag, target: target);
       catalogRelease = await github.publishNotLatest(catalogReleaseId);
       _validatePublic(catalogRelease, tag: catalogTag, target: target);
