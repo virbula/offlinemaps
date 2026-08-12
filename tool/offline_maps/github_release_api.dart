@@ -231,7 +231,9 @@ class GitHubReleaseClient {
 
   Future<List<GitHubReleaseAsset>> listAssets(int releaseId) async {
     final result = <GitHubReleaseAsset>[];
-    for (var page = 1; ; page++) {
+    // Page 11 is an intentional overflow probe: page 10 may contain exactly
+    // 100 assets, which is a valid 1,000-asset release.
+    for (var page = 1; page <= 11; page++) {
       final response = await _request(
         'GET',
         Uri.https(
@@ -249,11 +251,11 @@ class GitHubReleaseClient {
       final entries = decoded
           .map(GitHubReleaseAsset.fromJson)
           .toList(growable: false);
-      result.addAll(entries);
-      if (entries.length < 100) break;
-      if (page >= 10) {
+      if (page == 11 && entries.isNotEmpty) {
         throw const AutomationException('GitHub release exceeds 1000 assets.');
       }
+      result.addAll(entries);
+      if (entries.length < 100) break;
     }
     return List.unmodifiable(result);
   }
@@ -463,6 +465,20 @@ class GitHubReleaseClient {
         );
       }
     }
+  }
+
+  Future<void> deleteAsset(int assetId) async {
+    if (assetId <= 0) {
+      throw const AutomationException('GitHub asset id is invalid.');
+    }
+    await _request(
+      'DELETE',
+      Uri.https(
+        'api.github.com',
+        '/repos/$repository/releases/assets/$assetId',
+      ),
+      accepted: const <int>{204},
+    );
   }
 
   Future<GitHubRelease> publishNotLatest(int releaseId) => _patchRelease(

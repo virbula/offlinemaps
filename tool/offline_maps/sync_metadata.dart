@@ -53,10 +53,16 @@ Future<void> syncMetadata({
   if (!tagPattern.hasMatch(tag)) {
     throw const AutomationException('Sync release tag is invalid.');
   }
+  final synchronizedConfig = File(path.join(planDirectory.path, 'source.json'));
+  if (!synchronizedConfig.existsSync()) {
+    throw const AutomationException('Sync inputs are incomplete.');
+  }
+  validateSynchronizedRoadConfig(
+    await readJsonObject(synchronizedConfig),
+    mapReleaseTag: tag,
+  );
   final files = <String, File>{
-    'config/offline-map-build.json': File(
-      path.join(planDirectory.path, 'source.json'),
-    ),
+    'config/offline-map-build.json': synchronizedConfig,
     'catalog.json': File(path.join(metadataDirectory.path, 'catalog.json')),
     'offline-regions.generated.json': File(
       path.join(metadataDirectory.path, 'offline-regions.generated.json'),
@@ -117,6 +123,37 @@ Future<void> syncMetadata({
     });
   } finally {
     api.close();
+  }
+}
+
+void validateSynchronizedRoadConfig(
+  Map<String, Object?> config, {
+  required String mapReleaseTag,
+}) {
+  if (!mapReleaseTag.startsWith('maps-')) {
+    throw const AutomationException('Sync map release tag is invalid.');
+  }
+  final version = mapReleaseTag.substring('maps-'.length);
+  final generatedAt = utcTimestamp(config['generatedAt'], 'generatedAt');
+  final worldwide = object(config['worldwideRegions'], 'worldwideRegions');
+  final routing = object(config['routingDataset'], 'routingDataset');
+  if (config['releaseTag'] != mapReleaseTag ||
+      worldwide['version'] != version ||
+      routing['enabled'] != true ||
+      routing['required'] != true ||
+      routing['version'] != version ||
+      routing['releaseTag'] != 'routing-$version' ||
+      utcTimestamp(routing['updatedAt'], 'routingDataset.updatedAt') !=
+          generatedAt ||
+      object(routing['graphs'], 'routingDataset.graphs').isNotEmpty ||
+      object(routing['graphBounds'], 'routingDataset.graphBounds').isNotEmpty ||
+      object(
+        routing['regionGraphs'],
+        'routingDataset.regionGraphs',
+      ).isNotEmpty) {
+    throw const AutomationException(
+      'Synchronized map config is not ready for the matching routing backfill.',
+    );
   }
 }
 

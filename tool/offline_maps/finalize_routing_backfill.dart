@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 import 'build_routing.dart';
@@ -108,12 +110,18 @@ Future<void> finalizeRoutingBackfill(
     release['routingRegionCount'],
     'release.routingRegionCount',
   );
+  final expectedGraphCount = integer(
+    release['routingGraphCount'],
+    'release.routingGraphCount',
+  );
   final version = mapVersionForBackfillTag(mapTag);
   if (release['schemaVersion'] != routingBackfillSchemaVersion ||
       release['mode'] != 'routing-backfill' ||
       release['regionCount'] != expectedBackfillMapRegionCount ||
       release['mapOnlyRegionCount'] !=
           expectedBackfillMapRegionCount - expectedRoutingCount ||
+      expectedGraphCount < 1 ||
+      expectedGraphCount > expectedRoutingCount ||
       routingTag != 'routing-$version' ||
       catalogTag != catalogTagForVersion(version) ||
       release['releaseTag'] != catalogTag ||
@@ -134,24 +142,55 @@ Future<void> finalizeRoutingBackfill(
     manifest['routingBuilder'],
   );
   final routingRegions = routingRegionsFromManifest(manifest);
-  if (routingRegions.length != expectedRoutingCount) {
+  final routingGraphs = routingGraphRepresentatives(routingRegions);
+  if (routingRegions.length != expectedRoutingCount ||
+      routingGraphs.length != expectedGraphCount) {
     throw const AutomationException(
       'Backfill routing count differs from its immutable plan.',
     );
   }
-  final routingById = await _readReports(
+  final routingByGraph = await _readReports(
     options.reportsDirectory,
     expectedShards: expectedShards,
     releaseId: routingReleaseId,
     tag: routingTag,
     target: target,
     planSha256: planSha256,
-    regions: routingRegions,
+    regions: routingGraphs,
     repository: repository,
     engineVersion: builder.version,
   );
+  final descriptorByGraph = <String, Map<String, Object?>>{
+    for (final region in routingGraphs)
+      routingGraphIdForRegion(region):
+          routingByGraph[string(region['id'], 'region.id')]!,
+  };
+  final routingById = <String, Map<String, Object?>>{
+    for (final region in routingRegions)
+      string(region['id'], 'region.id'):
+          descriptorByGraph[routingGraphIdForRegion(region)]!,
+  };
+  final aliasesByGraph = <String, List<String>>{
+    for (final graph in routingGraphs)
+      routingGraphIdForRegion(graph):
+          routingRegions
+              .where(
+                (region) =>
+                    routingGraphIdForRegion(region) ==
+                    routingGraphIdForRegion(graph),
+              )
+              .map((region) => string(region['id'], 'region.id'))
+              .toList(growable: false)
+            ..sort(),
+  };
+  final roadCatalog = normalizeBackfillRoadCatalog(
+    catalog: baseCatalog,
+    manifest: manifest,
+    repository: repository,
+    mapReleaseTag: mapTag,
+  );
   final joined = buildJoinedBackfillCatalog(
-    baseCatalog: baseCatalog,
+    baseCatalog: roadCatalog,
     manifest: manifest,
     routingByRegion: routingById,
     repository: repository,
@@ -161,13 +200,14 @@ Future<void> finalizeRoutingBackfill(
   final metadata = await _writeBackfillMetadata(
     options.outputDirectory,
     joinedCatalog: joined,
+    baseCatalog: roadCatalog,
     manifestFile: options.manifest,
     manifest: manifest,
     release: release,
     routingById: routingById,
   );
   final baseRecords = validateBackfillBaseCatalog(
-    catalog: baseCatalog,
+    catalog: roadCatalog,
     manifest: manifest,
     repository: repository,
     mapReleaseTag: mapTag,
@@ -197,7 +237,8 @@ Future<void> finalizeRoutingBackfill(
     await _validateRoutingReleaseAssets(
       github,
       releaseId: routingReleaseId,
-      routingById: routingById,
+      routingById: routingByGraph,
+      aliasesByGraph: aliasesByGraph,
       planExactBytes: planExactBytes,
       planSha256: planSha256,
     );
@@ -219,6 +260,7 @@ Future<void> finalizeRoutingBackfill(
         'provenance.json',
         'SHA256SUMS',
         'catalog.json',
+        'road-catalog.json',
       ]) {
         final file = metadata[name]!;
         final existing = (await github.listAssets(
@@ -265,11 +307,18 @@ Future<void> finalizeRoutingBackfill(
       routingRelease = await github.publishNotLatest(routingReleaseId);
       _validatePublic(routingRelease, tag: routingTag, target: target);
     }
-    await _verifyPublicRouting(routingById.values);
+    await _verifyPublicRouting(
+      repository: repository,
+      tag: routingTag,
+      descriptors: routingByGraph.values,
+      aliasesByGraph: aliasesByGraph,
+      planSha256: planSha256,
+    );
     await _validateRoutingReleaseAssets(
       github,
       releaseId: routingReleaseId,
-      routingById: routingById,
+      routingById: routingByGraph,
+      aliasesByGraph: aliasesByGraph,
       planExactBytes: planExactBytes,
       planSha256: planSha256,
     );
@@ -311,7 +360,8 @@ Future<void> finalizeRoutingBackfill(
     github.close();
   }
   stdout.writeln(
-    'Published $routingTag with $expectedRoutingCount graphs and $catalogTag '
+    'Published $routingTag with $expectedGraphCount graphs for '
+    '$expectedRoutingCount regions and $catalogTag '
     'as latest; ${expectedBackfillMapRegionCount - expectedRoutingCount} '
     'regions remain map-only.',
   );
@@ -391,16 +441,19 @@ Future<Map<String, Map<String, Object?>>> _readReports(
 Future<Map<String, File>> _writeBackfillMetadata(
   Directory output, {
   required Map<String, Object?> joinedCatalog,
+  required Map<String, Object?> baseCatalog,
   required File manifestFile,
   required Map<String, Object?> manifest,
   required Map<String, Object?> release,
   required Map<String, Map<String, Object?>> routingById,
 }) async {
   final catalog = File(path.join(output.path, 'catalog.json'));
+  final roadCatalog = File(path.join(output.path, 'road-catalog.json'));
   final generated = File(
     path.join(output.path, 'offline-regions.generated.json'),
   );
   await writeJson(catalog, joinedCatalog);
+  await writeJson(roadCatalog, baseCatalog);
   await writeJson(generated, joinedCatalog);
   final builder = object(manifest['builder'], 'builder');
   final routingBuilder = object(manifest['routingBuilder'], 'routingBuilder');
@@ -430,6 +483,10 @@ Future<Map<String, File>> _writeBackfillMetadata(
     },
     'source': manifest['source'],
     'routingRegionCount': routingById.length,
+    'routingGraphCount': routingById.values
+        .map((descriptor) => descriptor['graphId'] ?? descriptor['file'])
+        .toSet()
+        .length,
     'mapOnlyRegionCount': expectedBackfillMapRegionCount - routingById.length,
     'regions': [
       for (final record in regions)
@@ -466,11 +523,25 @@ Future<Map<String, File>> _writeBackfillMetadata(
     for (final record in regions)
       string(record['file'], 'file'): string(record['sha256'], 'sha256'),
     for (final descriptor in routingById.values)
-      string(descriptor['file'], 'routing.file'): string(
-        descriptor['sha256'],
-        'routing.sha256',
-      ),
+      if (descriptor['parts'] is! List)
+        string(descriptor['file'], 'routing.file'): string(
+          descriptor['sha256'],
+          'routing.sha256',
+        ),
+    for (final descriptor in routingById.values)
+      for (final raw
+          in descriptor['parts'] is List
+              ? descriptor['parts']! as List
+              : const <Object?>[])
+        string(
+          object(raw, 'routing.part')['file'],
+          'routing.part.file',
+        ): string(
+          object(raw, 'routing.part')['sha256'],
+          'routing.part.sha256',
+        ),
     'catalog.json': await fileSha256(catalog),
+    'road-catalog.json': await fileSha256(roadCatalog),
     'offline-regions.generated.json': await fileSha256(generated),
     'provenance.json': await fileSha256(provenance),
   };
@@ -483,6 +554,7 @@ Future<Map<String, File>> _writeBackfillMetadata(
     'provenance.json': provenance,
     'SHA256SUMS': checksums,
     'catalog.json': catalog,
+    'road-catalog.json': roadCatalog,
   };
 }
 
@@ -520,15 +592,24 @@ Future<void> _validateRoutingReleaseAssets(
   GitHubReleaseClient github, {
   required int releaseId,
   required Map<String, Map<String, Object?>> routingById,
+  required Map<String, List<String>> aliasesByGraph,
   required int planExactBytes,
   required String planSha256,
 }) async {
   final assets = await github.listAssets(releaseId);
-  final names = <String>{
-    routingPlanAssetName,
-    for (final descriptor in routingById.values)
-      string(descriptor['file'], 'routing.file'),
-  };
+  final names = <String>{routingPlanAssetName};
+  for (final descriptor in routingById.values) {
+    final file = string(descriptor['file'], 'routing.file');
+    names.add(routingDescriptorAssetName(file));
+    final parts = descriptor['parts'];
+    if (parts is List) {
+      for (final raw in parts) {
+        names.add(string(object(raw, 'routing.part')['file'], 'part.file'));
+      }
+    } else {
+      names.add(file);
+    }
+  }
   if (assets.length != names.length ||
       assets.map((asset) => asset.name).toSet().length != names.length ||
       assets.any((asset) => !names.contains(asset.name))) {
@@ -544,20 +625,72 @@ Future<void> _validateRoutingReleaseAssets(
   }
   for (final descriptor in routingById.values) {
     final name = string(descriptor['file'], 'routing.file');
-    final matches = assets.where((asset) => asset.name == name).toList();
-    if (matches.length != 1 ||
-        matches.single.size > maximumGitHubReleaseAssetBytes ||
+    final label = routingAssetProvenanceLabel(
+      string(descriptor['sourceSha256'], '$name.sourceSha256'),
+      planSha256: planSha256,
+    );
+    final expected = <({String name, int bytes, String sha})>[];
+    final parts = descriptor['parts'];
+    if (parts is List) {
+      for (final raw in parts) {
+        final part = object(raw, 'routing.part');
+        expected.add((
+          name: string(part['file'], 'part.file'),
+          bytes: integer(part['exactBytes'], 'part.exactBytes'),
+          sha: string(part['sha256'], 'part.sha256'),
+        ));
+      }
+    } else {
+      expected.add((
+        name: name,
+        bytes: integer(descriptor['exactBytes'], '$name.exactBytes'),
+        sha: string(descriptor['sha256'], '$name.sha256'),
+      ));
+    }
+    for (final item in expected) {
+      final matches = assets
+          .where((asset) => asset.name == item.name)
+          .toList(growable: false);
+      if (matches.length != 1 ||
+          matches.single.size > maximumGitHubReleaseAssetBytes ||
+          !assetMatches(
+            matches.single,
+            exactBytes: item.bytes,
+            sha256: item.sha,
+          ) ||
+          matches.single.label != label) {
+        throw AutomationException(
+          '${item.name} failed routing-release verification.',
+        );
+      }
+    }
+    final sidecars = assets
+        .where((asset) => asset.name == routingDescriptorAssetName(name))
+        .toList(growable: false);
+    final graphId = string(descriptor['graphId'], '$name.graphId');
+    final aliases = aliasesByGraph[graphId];
+    if (aliases == null) {
+      throw AutomationException('$name has no planned graph aliases.');
+    }
+    final contents = routingDescriptorSidecarContents(
+      planSha256: planSha256,
+      graphId: graphId,
+      regionIds: aliases,
+      descriptor: descriptor,
+    );
+    final encoded = utf8.encode(contents);
+    final digest = sha256.convert(encoded).toString();
+    if (sidecars.length != 1 ||
+        sidecars.single.size > 1024 * 1024 ||
         !assetMatches(
-          matches.single,
-          exactBytes: integer(descriptor['exactBytes'], '$name.exactBytes'),
-          sha256: string(descriptor['sha256'], '$name.sha256'),
+          sidecars.single,
+          exactBytes: encoded.length,
+          sha256: digest,
         ) ||
-        matches.single.label !=
-            routingAssetProvenanceLabel(
-              string(descriptor['sourceSha256'], '$name.sourceSha256'),
-              planSha256: planSha256,
-            )) {
-      throw AutomationException('$name failed routing-release verification.');
+        sidecars.single.label != label) {
+      throw AutomationException(
+        '${routingDescriptorAssetName(name)} failed verification.',
+      );
     }
   }
 }
@@ -616,22 +749,69 @@ void _validatePublic(
   if (release.draft) throw AutomationException('$tag is still a draft.');
 }
 
-Future<void> _verifyPublicRouting(
-  Iterable<Map<String, Object?>> descriptors,
-) async {
+Future<void> _verifyPublicRouting({
+  required String repository,
+  required String tag,
+  required Iterable<Map<String, Object?>> descriptors,
+  required Map<String, List<String>> aliasesByGraph,
+  required String planSha256,
+}) async {
   final pending = <Future<void>>[];
   for (final descriptor in descriptors) {
+    final graphId = string(descriptor['graphId'], 'routing.graphId');
+    final aliases = aliasesByGraph[graphId];
+    if (aliases == null) {
+      throw AutomationException('$graphId has no planned aliases.');
+    }
+    final sidecarContents = routingDescriptorSidecarContents(
+      planSha256: planSha256,
+      graphId: graphId,
+      regionIds: aliases,
+      descriptor: descriptor,
+    );
+    final sidecarBytes = utf8.encode(sidecarContents);
     pending.add(
       _retryPublic(
-        url: httpsUri(descriptor['downloadUrl'], 'routing.downloadUrl'),
-        exactBytes: integer(descriptor['exactBytes'], 'routing.exactBytes'),
-        digest: string(descriptor['sha256'], 'routing.sha256'),
-        allowRange: true,
+        url: Uri.https(
+          'github.com',
+          '/$repository/releases/download/$tag/'
+              '${routingDescriptorAssetName(string(descriptor['file'], 'routing.file'))}',
+        ),
+        exactBytes: sidecarBytes.length,
+        digest: sha256.convert(sidecarBytes).toString(),
+        allowRange: false,
       ),
     );
-    if (pending.length == 8) {
-      await Future.wait(pending);
-      pending.clear();
+    final parts = descriptor['parts'];
+    if (parts is List) {
+      for (final raw in parts) {
+        final part = object(raw, 'routing.part');
+        pending.add(
+          _retryPublic(
+            url: httpsUri(part['downloadUrl'], 'routing.part.downloadUrl'),
+            exactBytes: integer(part['exactBytes'], 'routing.part.exactBytes'),
+            digest: string(part['sha256'], 'routing.part.sha256'),
+            allowRange: true,
+          ),
+        );
+        if (pending.length == 8) {
+          await Future.wait(pending);
+          pending.clear();
+        }
+      }
+    } else {
+      pending.add(
+        _retryPublic(
+          url: httpsUri(descriptor['downloadUrl'], 'routing.downloadUrl'),
+          exactBytes: integer(descriptor['exactBytes'], 'routing.exactBytes'),
+          digest: string(descriptor['sha256'], 'routing.sha256'),
+          allowRange: true,
+        ),
+      );
+      if (pending.length == 8) {
+        await Future.wait(pending);
+        pending.clear();
+      }
     }
   }
   if (pending.isNotEmpty) await Future.wait(pending);

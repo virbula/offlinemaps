@@ -488,11 +488,38 @@ class OfflineMapBuildManifest {
         'Routing regions must share one coordinated version and release tag.',
       );
     }
+    final routingGraphs = <String, String>{};
+    final routingFiles = <String, String>{};
+    for (final region in routingRegions) {
+      final routing = region.routing!;
+      final graphId = routing.graphId ?? region.id;
+      final identity = jsonEncode(<String, Object?>{
+        'graphId': graphId,
+        'bounds': routing.bounds?.toJson(),
+        'file': routing.file,
+        'releaseTag': routing.releaseTag,
+        'version': routing.version,
+        'updatedAt': routing.updatedAt.toIso8601String(),
+        'source': routing.source.toJson(),
+      });
+      if (routingGraphs[graphId] case final previous?
+          when previous != identity) {
+        throw OfflineMapBuildException(
+          'Routing graph $graphId has conflicting aliases.',
+        );
+      }
+      routingGraphs[graphId] = identity;
+      if (routingFiles[routing.file] case final previous?
+          when previous != graphId) {
+        throw OfflineMapBuildException(
+          '${routing.file} is shared by different routing graphs.',
+        );
+      }
+      routingFiles[routing.file] = graphId;
+    }
     if (!regions.any((region) => region.enabled) ||
         regions.map((region) => region.id).toSet().length != regions.length ||
-        regions.map((region) => region.file).toSet().length != regions.length ||
-        routingRegions.map((region) => region.routing!.file).toSet().length !=
-            routingRegions.length) {
+        regions.map((region) => region.file).toSet().length != regions.length) {
       throw const OfflineMapBuildException(
         'Regions need unique ids/files and at least one enabled entry.',
       );
@@ -546,6 +573,20 @@ class _BuiltArtifact {
   final String? routingSourceSha256;
 }
 
+class _BuiltRoutingArtifact {
+  const _BuiltRoutingArtifact({
+    required this.file,
+    required this.sha256,
+    required this.exactBytes,
+    required this.sourceSha256,
+  });
+
+  final File file;
+  final String sha256;
+  final int exactBytes;
+  final String sourceSha256;
+}
+
 Future<void> buildAllOfflineMaps(
   OfflineMapBuildManifest manifest, {
   required File manifestFile,
@@ -566,6 +607,7 @@ Future<void> buildAllOfflineMaps(
     await validateValhallaRoutingTool(manifest.routingBuilder!);
   }
   final artifacts = <_BuiltArtifact>[];
+  final builtRoutingGraphs = <String, _BuiltRoutingArtifact>{};
   for (var index = 0; index < manifest.enabledRegions.length; index++) {
     final region = manifest.enabledRegions[index];
     stdout.writeln(
@@ -604,53 +646,70 @@ Future<void> buildAllOfflineMaps(
     final routing = region.routing;
     String? routingSourceSha256 = routing?.source.sha256;
     if (routing != null) {
-      final stagedRouting = File(
-        path.join(stagingDirectory.path, routing.file),
-      );
-      if (await stagedRouting.exists()) await stagedRouting.delete();
-      final routingSourceCache = Directory(
-        path.join(cacheDirectory.path, 'routing-source-${region.id}'),
-      );
-      final request = ValhallaRoutingBuildRequest(
-        regionId: region.id,
-        source: routing.source,
-        output: stagedRouting,
-        workDirectory: Directory(
-          path.join(stagingDirectory.path, 'routing-work'),
-        ),
-        cacheDirectory: routingSourceCache,
-        builder: manifest.routingBuilder!,
-        routingUpdatedAt: routing.updatedAt,
-      );
-      File built;
-      try {
-        built = routingRegionBuilder == null
-            ? await buildValhallaRoutingPack(
-                request,
-                onSourceSha256: (digest) => routingSourceSha256 = digest,
-              )
-            : await routingRegionBuilder(request);
-      } finally {
-        if (await routingSourceCache.exists()) {
-          await routingSourceCache.delete(recursive: true);
+      final graphId = routing.graphId ?? region.id;
+      final previous = builtRoutingGraphs[graphId];
+      if (previous != null) {
+        routingDestination = previous.file;
+        routingSha256 = previous.sha256;
+        routingBytes = previous.exactBytes;
+        routingSourceSha256 = previous.sourceSha256;
+      } else {
+        final stagedRouting = File(
+          path.join(stagingDirectory.path, routing.file),
+        );
+        if (await stagedRouting.exists()) await stagedRouting.delete();
+        final routingSourceCache = Directory(
+          path.join(cacheDirectory.path, 'routing-source-$graphId'),
+        );
+        final request = ValhallaRoutingBuildRequest(
+          regionId: graphId,
+          source: routing.source,
+          output: stagedRouting,
+          workDirectory: Directory(
+            path.join(stagingDirectory.path, 'routing-work'),
+          ),
+          cacheDirectory: routingSourceCache,
+          builder: manifest.routingBuilder!,
+          routingUpdatedAt: routing.updatedAt,
+        );
+        File built;
+        try {
+          built = routingRegionBuilder == null
+              ? await buildValhallaRoutingPack(
+                  request,
+                  onSourceSha256: (digest) => routingSourceSha256 = digest,
+                )
+              : await routingRegionBuilder(request);
+        } finally {
+          if (await routingSourceCache.exists()) {
+            await routingSourceCache.delete(recursive: true);
+          }
         }
-      }
-      if (routingSourceSha256 == null ||
-          !routingSha256Pattern.hasMatch(routingSourceSha256!)) {
-        throw OfflineMapBuildException(
-          '${routing.file} did not record its PBF source SHA-256.',
+        if (routingSourceSha256 == null ||
+            !routingSha256Pattern.hasMatch(routingSourceSha256!)) {
+          throw OfflineMapBuildException(
+            '${routing.file} did not record its PBF source SHA-256.',
+          );
+        }
+        routingBytes = await built.length();
+        if (routingBytes <= 0 || routingBytes > maximumRoutingAssetBytes) {
+          throw OfflineMapBuildException(
+            '${routing.file} is empty or exceeds the routing pack limit.',
+          );
+        }
+        routingDestination = File(
+          path.join(outputDirectory.path, routing.file),
+        );
+        routingSha256 =
+            await _replaceArtifact(built, routingDestination) ??
+            await _fileSha256(routingDestination);
+        builtRoutingGraphs[graphId] = _BuiltRoutingArtifact(
+          file: routingDestination,
+          sha256: routingSha256,
+          exactBytes: routingBytes,
+          sourceSha256: routingSourceSha256!,
         );
       }
-      routingBytes = await built.length();
-      if (routingBytes <= 0 || routingBytes > maximumRoutingAssetBytes) {
-        throw OfflineMapBuildException(
-          '${routing.file} is empty or exceeds the routing pack limit.',
-        );
-      }
-      routingDestination = File(path.join(outputDirectory.path, routing.file));
-      routingSha256 =
-          await _replaceArtifact(built, routingDestination) ??
-          await _fileSha256(routingDestination);
     }
     artifacts.add(
       _BuiltArtifact(
@@ -736,14 +795,17 @@ Future<void> buildAllOfflineMaps(
   });
   await _writeChecksums(outputDirectory, <File>[
     ...artifacts.map((artifact) => artifact.file),
-    ...artifacts.map((artifact) => artifact.routingFile).whereType<File>(),
+    ...artifacts
+        .map((artifact) => artifact.routingFile)
+        .whereType<File>()
+        .toSet(),
     generated,
     catalog,
     provenance,
   ]);
   stdout.writeln(
     'Built ${artifacts.length} PMTiles region(s) and '
-    '${artifacts.where((artifact) => artifact.routingFile != null).length} '
+    '${builtRoutingGraphs.length} '
     'Valhalla routing pack(s) in ${outputDirectory.path}',
   );
 }
@@ -782,6 +844,8 @@ Map<String, Object?> _catalogRegion(
         'format': 'valhalla-tar',
         'engine': routingEngine,
         'engineVersion': routingEngineVersion,
+        if (routing.graphId != null) 'graphId': routing.graphId,
+        if (routing.bounds != null) 'bounds': routing.bounds!.toJson(),
         'file': routing.file,
         'exactBytes': routingBytes,
         'sha256': artifact.routingSha256,

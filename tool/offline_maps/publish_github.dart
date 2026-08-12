@@ -547,9 +547,11 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
         descriptor['exactBytes'],
         '${region.id}.routing.exactBytes',
       );
-      if (routingBytes <= 0 || routingBytes > maximumRoutingAssetBytes) {
+      if (routingBytes <= 0 || routingBytes > maximumGitHubReleaseAssetBytes) {
         throw GitHubPublishException(
-          '${region.id} routing bytes exceed the GitHub asset limit.',
+          '${region.id} routing bytes exceed GitHub\'s per-asset limit. Use '
+          'the coordinated routing-backfill workflow, which publishes '
+          'deterministic multipart transport assets.',
         );
       }
       _expectEqual(

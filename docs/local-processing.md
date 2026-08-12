@@ -79,15 +79,17 @@ commands from the `offlinemaps` repository root:
 make build_offline_maps
 ```
 
-The production configuration builds paired outputs. These explicit commands
-are useful for routing-focused operation and bounded validation:
+The production configuration can build paired outputs locally. Production
+worldwide publication uses the coordinated Actions backfill because it adds
+plan-bound sidecars, multipart transport, bounded continuation, and remote
+recovery. These commands are useful for local routing operation and validation:
 
 ```sh
-make plan_offline_maps_with_routing     # no PBF body downloads
+make plan_offline_maps_with_routing     # no PBF bodies or Valhalla image pull
 make test_offline_routing_fixture       # synthetic, no global build
 make validate_offline_routing_container # real Andorra build + 3 route modes
 make build_offline_routing_fixture      # same validation, retain graph for apps
-make build_offline_maps_with_routing    # full paired build
+make build_offline_maps_with_routing    # sequential full paired local build
 ```
 
 `build_offline_routing_fixture` writes the validated graph to
@@ -150,12 +152,13 @@ make plan_offline_maps
 make validate_offline_maps
 ```
 
-`validate_offline_maps` performs real CLI/source checks but no region
-extraction. `plan_offline_maps` skips the Protomaps planet-source checks and
-regional extraction, then prints the sequential plan. Both targets still
-prepare the checksum-pinned CLI and verify the pinned Natural Earth boundary
-files, so they may download the CLI and those small boundary inputs when they
-are not already cached.
+`validate_offline_maps` performs real CLI/source and installed-container checks
+but no region extraction. `plan_offline_maps` skips the Protomaps planet-source
+checks and regional extraction, then prints the sequential plan. Planning does
+not inspect or pull the Valhalla container. Both targets still prepare the
+checksum-pinned CLI and verify the pinned Natural Earth boundary files, so they
+may download the CLI and those small boundary inputs when they are not already
+cached.
 
 ## Configuring worldwide regions
 
@@ -249,16 +252,32 @@ compatible with the routing runtime embedded in that app build.
 The app downloads the map and graph together logically, verifies both, and
 continues to support map-only regions explicitly.
 
-The assets use two coordinated releases because 554 maps + 554 graphs + four
-metadata assets exceed GitHub's 1,000-assets-per-release cap. Graphs publish to
-`routing-<version>` first with `make_latest=false`; only after every graph is
-publicly verified does `maps-<version>` publish and become latest.
+Build one discovered graph locally without rebuilding every PMTiles map:
 
 ```sh
-make publish_offline_maps_github \
-  OFFLINE_MAP_PUBLISH_CONFIRM=maps-2026.08.12 \
-  OFFLINE_ROUTING_PUBLISH_CONFIRM=routing-2026.08.12
+make build_offline_routing_graph \
+  OFFLINE_ROUTING_GRAPH_ID=austria
 ```
+
+The command reads `OFFLINE_MAP_GENERATED_CONFIG` (normally
+`build/local/generated/worldwide-manifest.json`), keeps the pinned PBF cache
+under `build/local/cache`, and writes the graph plus descriptor/transport parts
+under `build/local/routing-graphs`. Override those variables when a larger
+volume is needed. Local builds use the same pinned container and multipart
+format as the self-hosted Actions runner.
+
+The current worldwide plan has 554 road maps, 549 routing-enabled map aliases,
+and 297 unique routing graphs. Production publication uses three coordinated
+releases: immutable `maps-<version>` roads, immutable
+`routing-<version>` graphs, and the latest `catalog-<version>` joined metadata.
+`road-catalog.json` remains available in the joined release as a routing-free
+fallback.
+
+The local single-graph target emits the same deterministic 1,900 MiB multipart
+files and descriptor used by Actions. The legacy paired local publisher can
+publish only monolithic graph archives below GitHub's per-asset limit and fails
+closed for a larger graph. Use `routing-backfill.yml` for the complete
+worldwide routing publication and safe interrupted-upload recovery.
 
 ## Routing data licensing
 
@@ -273,7 +292,7 @@ basemap remains a separate required download.
 This repository intentionally separates large release assets from reviewable
 release metadata. Keep completed `.pmtiles` archives in the ignored
 `build/local/output` release bundle and upload them only as GitHub Release
-assets. Track the four synchronized root metadata files—`catalog.json`,
+assets. Track the four road-build root metadata files—`catalog.json`,
 `offline-regions.generated.json`, `provenance.json`, and `SHA256SUMS`—so every
 published catalog and its provenance/checksum record can be reviewed in Git.
 
@@ -288,8 +307,8 @@ require GitHub authentication:
 make validate_offline_map_release
 ```
 
-Install and authenticate the GitHub CLI, then publish after reviewing the
-dry-run plan:
+Install and authenticate the GitHub CLI, then publish a reviewed road-only
+local bundle after its dry-run plan:
 
 ```sh
 gh auth login
@@ -305,7 +324,7 @@ an interrupted draft, add
 confirmation. `validate_offline_map_release` performs the full local bundle
 validation but never invokes a mutating GitHub command.
 
-The publisher reads `githubRepository` and `releaseTag` from the generated
+The legacy local publisher reads `githubRepository` and `releaseTag` from the generated
 schema-v2 manifest. It refuses command-line repository/tag overrides, validates
 every local SHA-256 against `catalog.json` and `SHA256SUMS`, checks provenance,
 rejects stale `.pmtiles` files, creates a draft release, uploads without
@@ -358,9 +377,9 @@ reuse its tag or filenames with different bytes.
    directory and clean output directory; do not mix files from different tags.
 4. Review the generated region counts, hierarchy, timestamp, provenance,
    checksums, and dry-run publication plan.
-5. Publish the new tag. The publisher uploads immutable tagged PMTiles URLs,
-   marks the verified release as GitHub's latest release, and verifies
-   `releases/latest/download/catalog.json` after publication.
+5. Publish the road tag. The monthly/production workflow then dispatches the
+   separately serialized routing backfill, which publishes routing first and
+   promotes the verified joined catalog only after all dependencies exist.
 
 The app is deliberately configured with that stable `releases/latest` catalog
 URL. Each time the Offline Maps tab opens it revalidates the catalog without

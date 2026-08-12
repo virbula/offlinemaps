@@ -224,6 +224,11 @@ Future<void> prepareRoutingBackfill(
   final planExactBytes = await manifestFile.length();
   final planSha256 = await fileSha256(manifestFile);
   final routingRegions = routingRegionsFromManifest(manifest);
+  final routingGraphs = routingGraphRepresentatives(routingRegions);
+  validateRoutingReleaseAssetBudget(routingRegions);
+  final routingReleaseAssetUpperBound = plannedRoutingReleaseAssetUpperBound(
+    routingRegions,
+  );
   _validateResumableManifest(
     baseConfig: baseConfig,
     manifest: manifest,
@@ -243,8 +248,13 @@ Future<void> prepareRoutingBackfill(
   final copiedCatalog = File(
     path.join(options.outputDirectory.path, 'base-catalog.json'),
   );
-  await options.baseCatalog.copy(copiedCatalog.path);
-  final catalog = await readJsonObject(copiedCatalog);
+  final catalog = normalizeBackfillRoadCatalog(
+    catalog: await readJsonObject(options.baseCatalog),
+    manifest: manifest,
+    repository: options.repository,
+    mapReleaseTag: mapTag,
+  );
+  await writeJson(copiedCatalog, catalog);
   final baseRecords = validateBackfillBaseCatalog(
     catalog: catalog,
     manifest: manifest,
@@ -252,17 +262,27 @@ Future<void> prepareRoutingBackfill(
     mapReleaseTag: mapTag,
   );
   final shards = planRoutingBackfillShards(routingRegions);
-  await writeJson(
-    File(path.join(options.outputDirectory.path, 'matrix.json')),
-    <String, Object?>{
-      'include': [
-        for (var index = 0; index < shards.length; index++)
-          <String, Object?>{
-            'shard': index.toString().padLeft(3, '0'),
-            'regionIds': shards[index],
-          },
-      ],
-    },
+  final representatives = <String, Map<String, Object?>>{
+    for (final region in routingGraphRepresentatives(routingRegions))
+      string(region['id'], 'region.id'): region,
+  };
+  int sourceBytes(String id) => ValhallaRoutingRegionConfiguration.fromJson(
+    representatives[id]!['routingBuild'],
+    field: '$id.routingBuild',
+  ).source.exactBytes;
+  final uniqueSources = <String, ValhallaRoutingSource>{
+    for (final region in routingGraphs)
+      ValhallaRoutingRegionConfiguration.fromJson(
+        region['routingBuild'],
+        field: '${region['id']}.routingBuild',
+      ).source.cacheKey: ValhallaRoutingRegionConfiguration.fromJson(
+        region['routingBuild'],
+        field: '${region['id']}.routingBuild',
+      ).source,
+  };
+  final routingSourceExactBytes = uniqueSources.values.fold<int>(
+    0,
+    (sum, source) => sum + source.exactBytes,
   );
 
   var mapReleaseId = 0;
@@ -271,6 +291,7 @@ Future<void> prepareRoutingBackfill(
   var noOp = false;
   var requiresBuild = false;
   var coordinatedTarget = options.target;
+  var completedGraphs = <String, Map<String, Object?>>{};
   if (!options.dryRun) {
     final client = github!;
     try {
@@ -345,6 +366,16 @@ Future<void> prepareRoutingBackfill(
         routingRegions: routingRegions,
         allowCreate: routes.draft,
       );
+      completedGraphs = await collectCompletedRoutingGraphs(
+        github: client,
+        releaseId: routes.id,
+        routingGraphs: routingGraphs,
+        routingRegions: routingRegions,
+        repository: options.repository,
+        builder: builder,
+        planSha256: planSha256,
+        outputDirectory: options.outputDirectory,
+      );
       await _validateCatalogReleaseAssets(client, releaseId: joinedCatalog.id);
       if (!routes.draft && !joinedCatalog.draft) {
         final latest = await client.latestRelease();
@@ -355,6 +386,44 @@ Future<void> prepareRoutingBackfill(
     } finally {
       client.close();
     }
+  }
+  final nextShardIndex = <int>[
+    for (var index = 0; index < shards.length; index++)
+      if (shards[index].any((id) => !completedGraphs.containsKey(id))) index,
+  ].firstOrNull;
+  final pending = nextShardIndex != null;
+  await writeJson(
+    File(path.join(options.outputDirectory.path, 'matrix.json')),
+    <String, Object?>{
+      'include': <Map<String, Object?>>[
+        if (nextShardIndex != null)
+          <String, Object?>{
+            'shard': nextShardIndex.toString().padLeft(3, '0'),
+            'regionIds': shards[nextShardIndex]
+                .where((id) => !completedGraphs.containsKey(id))
+                .toList(growable: false),
+            'maximumSourceExactBytes': shards[nextShardIndex]
+                .where((id) => !completedGraphs.containsKey(id))
+                .map(sourceBytes)
+                .reduce((left, right) => left > right ? left : right),
+            'aggregateSourceExactBytes': shards[nextShardIndex]
+                .where((id) => !completedGraphs.containsKey(id))
+                .map(sourceBytes)
+                .fold<int>(0, (sum, value) => sum + value),
+          },
+      ],
+    },
+  );
+  if (!options.dryRun && !pending) {
+    await _writeCollectedReports(
+      outputDirectory: options.outputDirectory,
+      shards: shards,
+      completedGraphs: completedGraphs,
+      releaseId: routingReleaseId,
+      tag: routingTag,
+      target: coordinatedTarget,
+      planSha256: planSha256,
+    );
   }
   await writeJson(
     File(path.join(options.outputDirectory.path, 'release.json')),
@@ -374,10 +443,15 @@ Future<void> prepareRoutingBackfill(
       'routingPlanExactBytes': planExactBytes,
       'routingPlanSha256': planSha256,
       'routingRegionCount': routingRegions.length,
+      'routingGraphCount': routingGraphs.length,
+      'routingReleaseAssetUpperBound': routingReleaseAssetUpperBound,
       'mapOnlyRegionCount':
           expectedBackfillMapRegionCount - routingRegions.length,
       'regionCount': expectedBackfillMapRegionCount,
       'shardCount': shards.length,
+      'routingSourceExactBytes': routingSourceExactBytes,
+      'completedGraphCount': completedGraphs.length,
+      'pending': pending,
       'generatedAt': catalog['generatedAt'],
       'noOp': noOp,
       'requiresBuild': requiresBuild,
@@ -385,9 +459,200 @@ Future<void> prepareRoutingBackfill(
   );
   stdout.writeln(
     'Prepared $routingTag: ${routingRegions.length} routing-enabled, '
+    '${routingGraphs.length} unique graphs, '
     '${expectedBackfillMapRegionCount - routingRegions.length} map-only, '
-    '${shards.length} shards.',
+    '${completedGraphs.length} completed, ${shards.length} planned shards.',
   );
+}
+
+Future<Map<String, Map<String, Object?>>> collectCompletedRoutingGraphs({
+  required GitHubReleaseClient github,
+  required int releaseId,
+  required List<Map<String, Object?>> routingGraphs,
+  required List<Map<String, Object?>> routingRegions,
+  required String repository,
+  required ValhallaRoutingBuilderConfiguration builder,
+  required String planSha256,
+  required Directory outputDirectory,
+  Future<void> Function(GitHubReleaseAsset asset, File destination)?
+  assetDownloader,
+}) async {
+  final assets = await github.listAssets(releaseId);
+  final graphBySidecar = <String, Map<String, Object?>>{
+    for (final region in routingGraphs)
+      routingDescriptorAssetName(
+        ValhallaRoutingRegionConfiguration.fromJson(
+          region['routingBuild'],
+          field: '${region['id']}.routingBuild',
+        ).file,
+      ): region,
+  };
+  final expectedSidecars = graphBySidecar.keys.toSet();
+  final presentSidecars = <String>{};
+  for (final asset in assets.where(
+    (value) => routingDescriptorAssetPattern.hasMatch(value.name),
+  )) {
+    if (!expectedSidecars.contains(asset.name) ||
+        !presentSidecars.add(asset.name) ||
+        asset.state != 'uploaded' ||
+        asset.size <= 0 ||
+        asset.size > 1024 * 1024 ||
+        asset.digest == null ||
+        !asset.digest!.startsWith('sha256:')) {
+      throw AutomationException('${asset.name} has invalid remote metadata.');
+    }
+    routingSourceSha256FromAssetLabel(
+      asset.label,
+      expectedPlanSha256: planSha256,
+    );
+  }
+  if (presentSidecars.length < expectedSidecars.length) {
+    // Sidecars are uploaded last and therefore act as an atomic completion
+    // marker during continuation. Avoid downloading every prior sidecar on
+    // every run; the all-complete run below performs full byte/canonical/
+    // transport verification before any release is published.
+    return Map.unmodifiable(<String, Map<String, Object?>>{
+      for (final sidecar in presentSidecars)
+        string(graphBySidecar[sidecar]!['id'], 'region.id'):
+            const <String, Object?>{},
+    });
+  }
+  final result = <String, Map<String, Object?>>{};
+  for (final region in routingGraphs) {
+    final id = string(region['id'], 'region.id');
+    final configuration = ValhallaRoutingRegionConfiguration.fromJson(
+      region['routingBuild'],
+      field: '$id.routingBuild',
+    );
+    final graphId = configuration.graphId ?? id;
+    final aliases =
+        routingRegions
+            .where((value) => routingGraphIdForRegion(value) == graphId)
+            .map((value) => string(value['id'], 'region.id'))
+            .toList(growable: false)
+          ..sort();
+    final sidecarName = routingDescriptorAssetName(configuration.file);
+    final sidecars = assets
+        .where((asset) => asset.name == sidecarName)
+        .toList(growable: false);
+    if (sidecars.isEmpty) continue;
+    if (sidecars.length != 1 ||
+        sidecars.single.size <= 0 ||
+        sidecars.single.size > 1024 * 1024) {
+      throw AutomationException('$sidecarName has invalid remote metadata.');
+    }
+    final sidecar = File(
+      path.join(outputDirectory.path, 'sidecars', sidecarName),
+    );
+    if (assetDownloader case final download?) {
+      await download(sidecars.single, sidecar);
+    } else {
+      await github.downloadAsset(asset: sidecars.single, destination: sidecar);
+    }
+    final parsed = await readJsonObject(sidecar);
+    final descriptor = object(parsed['routing'], 'sidecar.routing');
+    final canonical = routingDescriptorSidecarContents(
+      planSha256: planSha256,
+      graphId: graphId,
+      regionIds: aliases,
+      descriptor: descriptor,
+    );
+    if (parsed['schemaVersion'] != routingBackfillSchemaVersion ||
+        parsed['routingPlanSha256'] != planSha256 ||
+        parsed['graphId'] != graphId ||
+        !exactJson(parsed['regionIds'], aliases) ||
+        await sidecar.readAsString() != canonical) {
+      throw AutomationException('$sidecarName is stale or non-canonical.');
+    }
+    validateBackfillRoutingDescriptor(
+      descriptor: descriptor,
+      region: region,
+      repository: repository,
+      engineVersion: builder.version,
+    );
+    final label = routingAssetProvenanceLabel(
+      string(descriptor['sourceSha256'], 'routing.sourceSha256'),
+      planSha256: planSha256,
+    );
+    if (sidecars.single.label != label) {
+      throw AutomationException('$sidecarName has invalid provenance.');
+    }
+    final expected = <String, ({int bytes, String sha})>{};
+    final rawParts = descriptor['parts'];
+    if (rawParts is List) {
+      for (final raw in rawParts) {
+        final part = object(raw, 'routing.part');
+        expected[string(part['file'], 'part.file')] = (
+          bytes: integer(part['exactBytes'], 'part.exactBytes'),
+          sha: string(part['sha256'], 'part.sha256'),
+        );
+      }
+    } else {
+      expected[configuration.file] = (
+        bytes: integer(descriptor['exactBytes'], 'routing.exactBytes'),
+        sha: string(descriptor['sha256'], 'routing.sha256'),
+      );
+    }
+    final graphAssets = assets
+        .where(
+          (asset) =>
+              asset.name == configuration.file ||
+              (asset.name.startsWith('${configuration.file}.part') &&
+                  routingPartPattern.hasMatch(asset.name)),
+        )
+        .toList(growable: false);
+    if (graphAssets.length != expected.length ||
+        graphAssets.any((asset) => !expected.containsKey(asset.name))) {
+      throw AutomationException('$graphId transport asset set is not exact.');
+    }
+    for (final asset in graphAssets) {
+      final identity = expected[asset.name]!;
+      if (!assetMatches(
+            asset,
+            exactBytes: identity.bytes,
+            sha256: identity.sha,
+          ) ||
+          asset.label != label) {
+        throw AutomationException('${asset.name} failed exact verification.');
+      }
+    }
+    result[id] = descriptor;
+  }
+  return Map.unmodifiable(result);
+}
+
+Future<void> _writeCollectedReports({
+  required Directory outputDirectory,
+  required List<List<String>> shards,
+  required Map<String, Map<String, Object?>> completedGraphs,
+  required int releaseId,
+  required String tag,
+  required String target,
+  required String planSha256,
+}) async {
+  final reports = Directory(path.join(outputDirectory.path, 'reports'));
+  await reports.create(recursive: true);
+  for (var index = 0; index < shards.length; index++) {
+    final ids = shards[index];
+    if (ids.any((id) => !completedGraphs.containsKey(id))) {
+      throw const AutomationException(
+        'Cannot finalize before every graph sidecar is verified.',
+      );
+    }
+    final shard = index.toString().padLeft(3, '0');
+    await writeJson(File(path.join(reports.path, 'report-$shard.json')), {
+      'schemaVersion': routingBackfillSchemaVersion,
+      'routingReleaseId': releaseId,
+      'routingReleaseTag': tag,
+      'targetCommitish': target,
+      'routingPlanSha256': planSha256,
+      'shard': shard,
+      'regions': <Map<String, Object?>>[
+        for (final id in ids)
+          <String, Object?>{'id': id, 'routing': completedGraphs[id]},
+      ],
+    });
+  }
 }
 
 Future<void> _requireCoordinatedDraftsAreEmpty(
@@ -520,19 +785,30 @@ Future<void> _ensureRoutingPlanAsset(
   required List<Map<String, Object?>> routingRegions,
   required bool allowCreate,
 }) async {
-  final allowedGraphNames = <String>{
-    for (final region in routingRegions)
+  final configurations = <ValhallaRoutingRegionConfiguration>[
+    for (final region in routingGraphRepresentatives(routingRegions))
       ValhallaRoutingRegionConfiguration.fromJson(
         region['routingBuild'],
         field: '${region['id']}.routingBuild',
-      ).file,
-  };
+      ),
+  ];
+  bool allowedGraphName(String name) {
+    for (final configuration in configurations) {
+      if (name == configuration.file ||
+          name == routingDescriptorAssetName(configuration.file) ||
+          (name.startsWith('${configuration.file}.part') &&
+              routingPartPattern.hasMatch(name))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   var assets = await github.listAssets(releaseId);
   if (assets.map((asset) => asset.name).toSet().length != assets.length ||
       assets.any(
         (asset) =>
-            asset.name != routingPlanAssetName &&
-            !allowedGraphNames.contains(asset.name),
+            asset.name != routingPlanAssetName && !allowedGraphName(asset.name),
       )) {
     throw const AutomationException(
       'Routing draft contains an unexpected or duplicate asset.',
@@ -592,7 +868,9 @@ Future<void> _validateCatalogReleaseAssets(
 }) async {
   final assets = await github.listAssets(releaseId);
   if (assets.map((asset) => asset.name).toSet().length != assets.length ||
-      assets.any((asset) => !catalogMetadataAssetNames.contains(asset.name))) {
+      assets.any(
+        (asset) => !joinedCatalogMetadataAssetNames.contains(asset.name),
+      )) {
     throw const AutomationException(
       'Catalog draft contains an unexpected or duplicate asset.',
     );
@@ -630,10 +908,20 @@ Future<void> _validateReusableDiscovery(
   );
   final strippedDiscovered = <String, Object?>{
     ...discoveredDataset,
-    'sources': baseDataset['sources'],
+    'graphs': baseDataset['graphs'],
+    'graphBounds': baseDataset['graphBounds'],
+    'regionGraphs': baseDataset['regionGraphs'],
   };
   if (!deepJsonEquals(baseDataset, strippedDiscovered) ||
-      object(discoveredDataset['sources'], 'routingDataset.sources').isEmpty) {
+      object(discoveredDataset['graphs'], 'routingDataset.graphs').isEmpty ||
+      object(
+        discoveredDataset['graphBounds'],
+        'routingDataset.graphBounds',
+      ).isEmpty ||
+      object(
+        discoveredDataset['regionGraphs'],
+        'routingDataset.regionGraphs',
+      ).isEmpty) {
     throw const AutomationException(
       'Reusable routing discovery has an invalid contract or no sources.',
     );

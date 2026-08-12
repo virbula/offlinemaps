@@ -6,7 +6,7 @@ PMTILES_DARWIN_X64_SHA256 := 60c84fc6213cb0f4ef39c6926bbc4dd2327e77b53d182f994c2
 PMTILES_LINUX_ARM64_SHA256 := a1f9f42d8317ab1fadc25dd050e208547f32a3f99a4b90e7cb8fd6030f143d8e
 PMTILES_LINUX_X64_SHA256 := 23a2a2222f658320b539ccd06ac3b9b3b803ecbdd39a6cb5249d2ce2e16e38ae
 VALHALLA_VERSION := 3.6.3
-VALHALLA_IMAGE := ghcr.io/valhalla/valhalla:$(VALHALLA_VERSION)@sha256:2b19ea46551a9687b245022551183829d817fdee9b58c5e7b2adb6e422749c43
+VALHALLA_IMAGE := ghcr.io/valhalla/valhalla:$(VALHALLA_VERSION)@sha256:0cf1520c6a38b8a7e13a1931541e0ab6e9e42b64b4ca014293b6b8373d493160
 
 OFFLINE_MAP_BUILD_CONFIG ?= config/offline-map-build.json
 OFFLINE_MAP_BUILD_DIR ?= build/local
@@ -22,6 +22,9 @@ OFFLINE_MAP_PUBLISH_FLAGS ?=
 OFFLINE_MAP_PUBLISH_CONFIRM ?=
 OFFLINE_ROUTING_PUBLISH_CONFIRM ?=
 OFFLINE_ROUTING_FIXTURE_OUTPUT ?= build/fixtures/andorra-3.6.3.vtiles.tar
+OFFLINE_ROUTING_GRAPH_ID ?=
+OFFLINE_ROUTING_GRAPH_OUTPUT_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/routing-graphs
+OFFLINE_ROUTING_GRAPH_WORK_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/routing-work
 
 OFFLINE_MAP_METADATA_FILES := catalog.json offline-regions.generated.json provenance.json SHA256SUMS
 
@@ -74,7 +77,14 @@ routing_tools:
 	@docker version >/dev/null 2>&1 || { echo "ERROR: Start the Docker daemon before building routing packs."; exit 1; }
 	@image="$$(jq -er '.routingBuilder.image | select(type == "string")' "$(OFFLINE_MAP_BUILD_CONFIG)")"; \
 		test "$$image" = "$(VALHALLA_IMAGE)" || { echo "ERROR: Makefile and manifest Valhalla pins differ."; exit 1; }; \
-		docker pull "$$image"
+		if ! docker image inspect "$$image" >/dev/null 2>&1; then \
+			for attempt in 1 2 3 4 5; do \
+				docker pull --platform linux/amd64 "$$image" && break; \
+				test "$$attempt" -lt 5 || exit 1; \
+				sleep "$$((1 << (attempt - 1)))"; \
+			done; \
+		fi; \
+		test "$$(docker image inspect "$$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
 
 .PHONY: prepare_offline_map_tools
 prepare_offline_map_tools: check_offline_map_build_config deps tools
@@ -82,7 +92,14 @@ prepare_offline_map_tools: check_offline_map_build_config deps tools
 .PHONY: build_offline_maps
 build_offline_maps: prepare_offline_map_tools
 	@routing_enabled="$$(jq -er '.routingDataset.enabled | select(type == "boolean")' "$(OFFLINE_MAP_BUILD_CONFIG)")"; \
-		if [ "$$routing_enabled" = true ]; then $(MAKE) routing_tools; fi
+		build_flags=" $(strip $(OFFLINE_MAP_BUILD_FLAGS)) "; \
+		case "$$build_flags" in \
+			*" --dry-run "*) requires_routing_tools=false ;; \
+			*) requires_routing_tools=true ;; \
+		esac; \
+		if [ "$$routing_enabled" = true ] && [ "$$requires_routing_tools" = true ]; then \
+			$(MAKE) routing_tools; \
+		fi
 	@echo "Offline-map source manifest:    $(OFFLINE_MAP_BUILD_CONFIG)"
 	@echo "Offline-map generated manifest: $(OFFLINE_MAP_GENERATED_CONFIG)"
 	@echo "Offline-map staging:            $(OFFLINE_MAP_STAGING_DIR)"
@@ -130,6 +147,23 @@ validate_offline_routing_container: deps routing_tools
 build_offline_routing_fixture: deps routing_tools
 	$(DART) run tool/offline_maps/validate_routing_fixture.dart \
 		--output "$(OFFLINE_ROUTING_FIXTURE_OUTPUT)"
+
+.PHONY: build_offline_routing_graph
+build_offline_routing_graph: deps routing_tools
+	@test -n "$(strip $(OFFLINE_ROUTING_GRAPH_ID))" || { \
+		echo "ERROR: Set OFFLINE_ROUTING_GRAPH_ID to a graphId from $(OFFLINE_MAP_GENERATED_CONFIG)."; \
+		exit 1; \
+	}
+	@test -f "$(OFFLINE_MAP_GENERATED_CONFIG)" || { \
+		echo "ERROR: $(OFFLINE_MAP_GENERATED_CONFIG) does not exist. Run routing discovery and worldwide manifest generation first."; \
+		exit 1; \
+	}
+	$(DART) run tool/offline_maps/build_routing_graph.dart \
+		--manifest "$(OFFLINE_MAP_GENERATED_CONFIG)" \
+		--graph-id "$(OFFLINE_ROUTING_GRAPH_ID)" \
+		--output-dir "$(OFFLINE_ROUTING_GRAPH_OUTPUT_DIR)" \
+		--cache-dir "$(OFFLINE_MAP_CACHE_DIR)/routing-source-$(OFFLINE_ROUTING_GRAPH_ID)" \
+		--work-dir "$(OFFLINE_ROUTING_GRAPH_WORK_DIR)"
 
 .PHONY: sync_offline_map_metadata
 sync_offline_map_metadata:

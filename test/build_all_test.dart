@@ -291,6 +291,94 @@ void main() {
       hasLength(6),
     );
   });
+
+  test('builds one shared routing graph for multiple region aliases', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'pmtiles-shared-routing-',
+    );
+    addTearDown(() => temporary.delete(recursive: true));
+    final json = _manifestJson();
+    json['routingBuilder'] = <String, Object?>{
+      'dockerExecutable': 'docker',
+      'image': supportedValhallaBuilderImage,
+      'version': supportedValhallaGraphVersion,
+      'buildConcurrency': 2,
+    };
+    final regions = (json['regions']! as List).cast<Map<String, Object?>>();
+    final shared = <String, Object?>{
+      'graphId': 'geofabrik-shared',
+      'bounds': <String, Object?>{
+        'west': -125.0,
+        'south': 30.0,
+        'east': 5.0,
+        'north': 55.0,
+      },
+      'file': 'geofabrik-shared-routing-2026.08.1.vtiles.tar',
+      'releaseTag': 'routing-2026.08.1',
+      'version': '2026.08.1',
+      'updatedAt': '2026-08-11T20:00:00Z',
+      'source': <String, Object?>{
+        'url': 'https://download.example.test/shared.osm.pbf',
+        'exactBytes': 12,
+        'sha256': 'b' * 64,
+      },
+    };
+    for (final region in regions) {
+      region['routingBuild'] = jsonDecode(jsonEncode(shared));
+    }
+    final manifestFile = File('${temporary.path}/manifest.json');
+    await manifestFile.writeAsString(jsonEncode(json));
+    final manifest = OfflineMapBuildManifest.fromJson(json);
+    var routingBuilds = 0;
+
+    await buildAllOfflineMaps(
+      manifest,
+      manifestFile: manifestFile,
+      outputDirectory: Directory('${temporary.path}/output'),
+      stagingDirectory: Directory('${temporary.path}/staging'),
+      cacheDirectory: Directory('${temporary.path}/cache'),
+      sourceValidator: (_) async {},
+      regionBuilder: (request) async {
+        await request.output.parent.create(recursive: true);
+        await request.output.writeAsBytes(utf8.encode('map:${request.id}'));
+        return _inspection(request);
+      },
+      routingRegionBuilder: (request) async {
+        routingBuilds++;
+        await request.output.writeAsBytes(List<int>.filled(24, 9));
+        return request.output;
+      },
+      runner: _VersionRunner(),
+    );
+
+    expect(routingBuilds, 1);
+    final catalog =
+        jsonDecode(
+              await File(
+                '${temporary.path}/output/catalog.json',
+              ).readAsString(),
+            )
+            as Map<String, Object?>;
+    final catalogRegions = (catalog['regions']! as List).cast<Map>();
+    expect(
+      catalogRegions.map((region) => (region['routing']! as Map)['graphId']),
+      everyElement('geofabrik-shared'),
+    );
+    expect(
+      File(
+        '${temporary.path}/output/'
+        'geofabrik-shared-routing-2026.08.1.vtiles.tar',
+      ).existsSync(),
+      isTrue,
+    );
+    final checksumLines = await File(
+      '${temporary.path}/output/SHA256SUMS',
+    ).readAsLines();
+    expect(
+      checksumLines.where((line) => line.endsWith('.vtiles.tar')).length,
+      1,
+    );
+  });
 }
 
 Map<String, Object?> _manifestJson() => <String, Object?>{

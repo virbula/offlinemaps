@@ -4,15 +4,19 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
-// GitHub Releases reject an individual asset at 2 GiB. Keep this ceiling in
-// the shared model so planning, building, resuming, and finalization all fail
-// before attempting an upload with an unsupported graph.
+// GitHub Releases reject an individual asset at 2 GiB. A routing graph is a
+// logical archive that may be larger, so large archives are transported as
+// deterministic 1,900 MiB parts and reassembled by the client before Valhalla
+// opens them.
 const int maximumGitHubReleaseAssetBytes = 2 * 1024 * 1024 * 1024 - 1;
-const int maximumRoutingAssetBytes = maximumGitHubReleaseAssetBytes;
+// Stay comfortably below GitHub's 2 GiB per-asset ceiling while minimizing
+// transport assets in the worldwide release's hard 1,000-asset budget.
+const int routingTransportPartBytes = 1900 * 1024 * 1024;
+const int maximumRoutingAssetBytes = 16 * 1024 * 1024 * 1024;
 const String supportedValhallaGraphVersion = '3.6.3';
 const String supportedValhallaBuilderImage =
     'ghcr.io/valhalla/valhalla:3.6.3@sha256:'
-    '2b19ea46551a9687b245022551183829d817fdee9b58c5e7b2adb6e422749c43';
+    '0cf1520c6a38b8a7e13a1931541e0ab6e9e42b64b4ca014293b6b8373d493160';
 const int maximumRoutingSourceBytes = 16 * 1024 * 1024 * 1024;
 const List<String> supportedRoutingModes = <String>[
   'driving',
@@ -43,6 +47,29 @@ final RegExp routingMd5Pattern = RegExp(r'^[a-f0-9]{32}$');
 final RegExp routingAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,210}\.vtiles\.tar$',
 );
+final RegExp routingGraphIdPattern = RegExp(
+  r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$',
+);
+final RegExp routingPartPattern = RegExp(
+  r'^[a-z0-9][a-z0-9._-]{0,210}\.vtiles\.tar\.part[0-9]{3}$',
+);
+final RegExp routingDescriptorAssetPattern = RegExp(
+  r'^[a-z0-9][a-z0-9._-]{0,210}\.vtiles\.descriptor\.json$',
+);
+
+String routingDescriptorAssetName(String routingFile) {
+  if (!routingAssetPattern.hasMatch(routingFile)) {
+    throw const RoutingBuildException('Routing filename is unsafe.');
+  }
+  final value = routingFile.replaceFirst(
+    RegExp(r'\.vtiles\.tar$'),
+    '.vtiles.descriptor.json',
+  );
+  if (!routingDescriptorAssetPattern.hasMatch(value)) {
+    throw const RoutingBuildException('Routing descriptor filename is unsafe.');
+  }
+  return value;
+}
 
 String routingAssetProvenanceLabel(String sourceSha256, {String? planSha256}) {
   final normalized = sourceSha256.toLowerCase();
@@ -235,8 +262,68 @@ class ValhallaRoutingSource {
   };
 }
 
+class RoutingCoverageBounds {
+  const RoutingCoverageBounds({
+    required this.west,
+    required this.south,
+    required this.east,
+    required this.north,
+  });
+
+  factory RoutingCoverageBounds.fromJson(Object? value, String field) {
+    final map = _object(value, field);
+    _rejectUnknown(map, const <String>{
+      'west',
+      'south',
+      'east',
+      'north',
+    }, field);
+    double number(Object? value, String child) {
+      if (value is! num || !value.toDouble().isFinite) {
+        throw RoutingBuildException('$field.$child must be finite.');
+      }
+      return value.toDouble();
+    }
+
+    final west = number(map['west'], 'west');
+    final south = number(map['south'], 'south');
+    final east = number(map['east'], 'east');
+    final north = number(map['north'], 'north');
+    if (west < -180 ||
+        west > 180 ||
+        east < -180 ||
+        east > 180 ||
+        south < -85.0511287 ||
+        north > 85.0511287 ||
+        south >= north ||
+        west == east) {
+      throw RoutingBuildException('$field is outside Web Mercator bounds.');
+    }
+    return RoutingCoverageBounds(
+      west: west,
+      south: south,
+      east: east,
+      north: north,
+    );
+  }
+
+  final double west;
+  final double south;
+  final double east;
+  final double north;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'west': west,
+    'south': south,
+    'east': east,
+    'north': north,
+  };
+}
+
 class ValhallaRoutingRegionConfiguration {
   const ValhallaRoutingRegionConfiguration({
+    required this.graphId,
+    required this.bounds,
     required this.file,
     required this.releaseTag,
     required this.version,
@@ -250,6 +337,8 @@ class ValhallaRoutingRegionConfiguration {
   }) {
     final map = _object(value, field);
     _rejectUnknown(map, const <String>{
+      'graphId',
+      'bounds',
       'file',
       'releaseTag',
       'version',
@@ -275,7 +364,17 @@ class ValhallaRoutingRegionConfiguration {
         '$field.version must match the routing release tag.',
       );
     }
+    final graphId = map['graphId'] == null
+        ? null
+        : _string(map['graphId'], '$field.graphId');
+    if (graphId != null && !routingGraphIdPattern.hasMatch(graphId)) {
+      throw RoutingBuildException('$field.graphId is unsafe.');
+    }
     return ValhallaRoutingRegionConfiguration(
+      graphId: graphId,
+      bounds: map['bounds'] == null
+          ? null
+          : RoutingCoverageBounds.fromJson(map['bounds'], '$field.bounds'),
       file: file,
       releaseTag: tag,
       version: version,
@@ -284,11 +383,201 @@ class ValhallaRoutingRegionConfiguration {
     );
   }
 
+  final String? graphId;
+  final RoutingCoverageBounds? bounds;
   final String file;
   final String releaseTag;
   final String version;
   final DateTime updatedAt;
   final ValhallaRoutingSource source;
+}
+
+class RoutingTransportPart {
+  const RoutingTransportPart({
+    required this.file,
+    required this.exactBytes,
+    required this.sha256,
+  });
+
+  final String file;
+  final int exactBytes;
+  final String sha256;
+}
+
+Future<List<RoutingTransportPart>> splitRoutingArchiveForTransport({
+  required File archive,
+  required Directory outputDirectory,
+  int partBytes = routingTransportPartBytes,
+  int multipartThresholdBytes = maximumGitHubReleaseAssetBytes,
+}) async {
+  final archiveName = path.basename(archive.path);
+  if (!routingAssetPattern.hasMatch(archiveName) ||
+      multipartThresholdBytes <= 0 ||
+      multipartThresholdBytes > maximumGitHubReleaseAssetBytes ||
+      partBytes <= 0 ||
+      partBytes > multipartThresholdBytes) {
+    throw const RoutingBuildException(
+      'Routing transport split configuration is invalid.',
+    );
+  }
+  final total = await archive.length();
+  if (total <= 0 || total > maximumRoutingAssetBytes) {
+    throw const RoutingBuildException('Routing archive size is invalid.');
+  }
+  if (total <= multipartThresholdBytes) {
+    return const <RoutingTransportPart>[];
+  }
+  await outputDirectory.create(recursive: true);
+  final input = await archive.open();
+  final result = <RoutingTransportPart>[];
+  try {
+    var remaining = total;
+    var index = 1;
+    while (remaining > 0) {
+      if (index > 999) {
+        throw const RoutingBuildException(
+          'Routing archive requires too many transport parts.',
+        );
+      }
+      final fileName = '$archiveName.part${index.toString().padLeft(3, '0')}';
+      if (!routingPartPattern.hasMatch(fileName)) {
+        throw const RoutingBuildException(
+          'Generated routing transport part name is unsafe.',
+        );
+      }
+      final file = File(path.join(outputDirectory.path, fileName));
+      if (await file.exists()) {
+        throw RoutingBuildException(
+          'Refusing to overwrite routing transport part ${file.path}.',
+        );
+      }
+      final sink = file.openWrite();
+      var written = 0;
+      try {
+        final target = remaining < partBytes ? remaining : partBytes;
+        while (written < target) {
+          final request = target - written;
+          final chunk = await input.read(
+            request < 8 * 1024 * 1024 ? request : 8 * 1024 * 1024,
+          );
+          if (chunk.isEmpty) {
+            throw const RoutingBuildException(
+              'Routing archive ended during transport splitting.',
+            );
+          }
+          sink.add(chunk);
+          written += chunk.length;
+        }
+      } finally {
+        await sink.close();
+      }
+      if (written <= 0 || written > maximumGitHubReleaseAssetBytes) {
+        throw const RoutingBuildException(
+          'Generated routing transport part has an invalid size.',
+        );
+      }
+      result.add(
+        RoutingTransportPart(
+          file: fileName,
+          exactBytes: written,
+          sha256: await routingFileSha256(file),
+        ),
+      );
+      remaining -= written;
+      index++;
+    }
+  } catch (_) {
+    for (final part in result) {
+      final file = File(path.join(outputDirectory.path, part.file));
+      if (await file.exists()) await file.delete();
+    }
+    rethrow;
+  } finally {
+    await input.close();
+  }
+  if (result.fold<int>(0, (sum, value) => sum + value.exactBytes) != total) {
+    throw const RoutingBuildException(
+      'Routing transport parts do not reconstruct the logical archive size.',
+    );
+  }
+  return List<RoutingTransportPart>.unmodifiable(result);
+}
+
+Future<File> reconstructRoutingArchive({
+  required List<RoutingTransportPart> parts,
+  required Directory partsDirectory,
+  required File output,
+  required int exactBytes,
+  required String sha256Digest,
+  int multipartThresholdBytes = maximumGitHubReleaseAssetBytes,
+}) async {
+  if (parts.length < 2 ||
+      multipartThresholdBytes <= 0 ||
+      multipartThresholdBytes > maximumGitHubReleaseAssetBytes ||
+      exactBytes <= multipartThresholdBytes ||
+      exactBytes > maximumRoutingAssetBytes ||
+      !routingSha256Pattern.hasMatch(sha256Digest) ||
+      await output.exists()) {
+    throw const RoutingBuildException(
+      'Routing reconstruction metadata is invalid.',
+    );
+  }
+  await output.parent.create(recursive: true);
+  final partial = File('${output.path}.part');
+  if (await partial.exists()) {
+    throw RoutingBuildException(
+      'Stale routing reconstruction partial blocks ${output.path}.',
+    );
+  }
+  final sink = partial.openWrite();
+  var received = 0;
+  try {
+    for (var index = 0; index < parts.length; index++) {
+      final metadata = parts[index];
+      final expectedName =
+          '${path.basename(output.path)}.part'
+          '${(index + 1).toString().padLeft(3, '0')}';
+      if (metadata.file != expectedName ||
+          !routingPartPattern.hasMatch(metadata.file) ||
+          metadata.exactBytes <= 0 ||
+          metadata.exactBytes > maximumGitHubReleaseAssetBytes ||
+          !routingSha256Pattern.hasMatch(metadata.sha256)) {
+        throw const RoutingBuildException(
+          'Routing transport part metadata is invalid or unordered.',
+        );
+      }
+      final file = File(path.join(partsDirectory.path, metadata.file));
+      if (!await file.exists() ||
+          await file.length() != metadata.exactBytes ||
+          await routingFileSha256(file) != metadata.sha256) {
+        throw RoutingBuildException(
+          'Routing transport part ${metadata.file} failed validation.',
+        );
+      }
+      await sink.addStream(file.openRead());
+      received += metadata.exactBytes;
+      if (received > exactBytes) {
+        throw const RoutingBuildException(
+          'Routing reconstruction exceeded its declared size.',
+        );
+      }
+    }
+  } catch (_) {
+    await sink.close();
+    if (await partial.exists()) await partial.delete();
+    rethrow;
+  }
+  await sink.close();
+  if (received != exactBytes ||
+      await partial.length() != exactBytes ||
+      await routingFileSha256(partial) != sha256Digest) {
+    if (await partial.exists()) await partial.delete();
+    throw const RoutingBuildException(
+      'Reconstructed routing archive failed size or checksum validation.',
+    );
+  }
+  await partial.rename(output.path);
+  return output;
 }
 
 class ValhallaRoutingBuildRequest {
@@ -380,7 +669,7 @@ Future<File> fetchPinnedRoutingSource(
   ValhallaRoutingSource source,
   File destination,
 ) async {
-  if (await _matchesSource(destination, source)) return destination;
+  if (await routingSourceMatches(destination, source)) return destination;
   await destination.parent.create(recursive: true);
   final temporary = File('${destination.path}.download');
   if (await temporary.exists()) await temporary.delete();
@@ -418,7 +707,7 @@ Future<File> fetchPinnedRoutingSource(
       await sink.close();
     }
     if (received != source.exactBytes ||
-        !await _matchesSource(temporary, source)) {
+        !await routingSourceMatches(temporary, source)) {
       throw const RoutingBuildException(
         'Routing source failed its pinned size or checksum check.',
       );
@@ -462,18 +751,20 @@ Future<File> buildValhallaRoutingPack(
   );
   if (await buildRoot.exists()) await buildRoot.delete(recursive: true);
   await buildRoot.create(recursive: true);
-  final input = File(path.join(buildRoot.path, 'region.osm.pbf'));
   final temporaryOutput = File(path.join(buildRoot.path, 'routing.vtiles.tar'));
   try {
-    await source.copy(input.path);
     final epoch =
         request.routingUpdatedAt.toUtc().millisecondsSinceEpoch ~/ 1000;
     final result = await runner.run(request.builder.dockerExecutable, <String>[
       'run',
+      '--platform',
+      'linux/amd64',
       '--rm',
       '--network=none',
       '--volume',
       '${buildRoot.absolute.path}:/work',
+      '--volume',
+      '${source.absolute.path}:/input/region.osm.pbf:ro',
       '--env',
       'SOURCE_DATE_EPOCH=$epoch',
       '--env',
@@ -532,9 +823,9 @@ valhalla_build_config \
   --mjolnir-admin /work/admins.sqlite \
   --mjolnir-concurrency "$VALHALLA_BUILD_CONCURRENCY" \
   > /work/valhalla.json
-valhalla_build_admins -c /work/valhalla.json /work/region.osm.pbf
+valhalla_build_admins -c /work/valhalla.json /input/region.osm.pbf
 test -s /work/admins.sqlite
-valhalla_build_tiles -c /work/valhalla.json /work/region.osm.pbf
+valhalla_build_tiles -c /work/valhalla.json /input/region.osm.pbf
 find /work/tiles -type f -name '*.gph' -printf '%P\n' \
   | LC_ALL=C sort > /work/tile-list.txt
 test -s /work/tile-list.txt
@@ -547,6 +838,7 @@ tar --create \
   --numeric-owner \
   --mtime="@$SOURCE_DATE_EPOCH" \
   --format=gnu \
+  --remove-files \
   --files-from /work/tile-list.txt
 test -s /work/routing.vtiles.tar
 ''';
@@ -558,27 +850,68 @@ Future<Map<String, Object?>> routingCatalogDescriptor({
   required int exactBytes,
   required String sha256Digest,
   required String sourceSha256,
+  List<RoutingTransportPart> parts = const <RoutingTransportPart>[],
+  int multipartThresholdBytes = maximumGitHubReleaseAssetBytes,
 }) async {
   if (exactBytes <= 0 ||
       exactBytes > maximumRoutingAssetBytes ||
       !routingSha256Pattern.hasMatch(sha256Digest) ||
-      !routingSha256Pattern.hasMatch(sourceSha256)) {
+      !routingSha256Pattern.hasMatch(sourceSha256) ||
+      multipartThresholdBytes <= 0 ||
+      multipartThresholdBytes > maximumGitHubReleaseAssetBytes ||
+      (parts.isNotEmpty &&
+          (exactBytes <= multipartThresholdBytes ||
+              parts.length < 2 ||
+              parts.fold<int>(0, (sum, value) => sum + value.exactBytes) !=
+                  exactBytes))) {
     throw const RoutingBuildException('Invalid built routing pack metadata.');
+  }
+  final releasePath =
+      '/$repository/releases/download/${configuration.releaseTag}/';
+  for (var index = 0; index < parts.length; index++) {
+    final part = parts[index];
+    final expected =
+        '${configuration.file}.part'
+        '${(index + 1).toString().padLeft(3, '0')}';
+    if (part.file != expected ||
+        !routingPartPattern.hasMatch(part.file) ||
+        part.exactBytes <= 0 ||
+        part.exactBytes > maximumGitHubReleaseAssetBytes ||
+        !routingSha256Pattern.hasMatch(part.sha256)) {
+      throw const RoutingBuildException(
+        'Invalid routing transport part metadata.',
+      );
+    }
   }
   return <String, Object?>{
     'format': 'valhalla-tar',
     'engine': routingEngine,
     'engineVersion': builder.version,
+    if (configuration.graphId != null) 'graphId': configuration.graphId,
+    if (configuration.bounds != null) 'bounds': configuration.bounds!.toJson(),
     'file': configuration.file,
     'exactBytes': exactBytes,
     'sha256': sha256Digest,
     'sourceSha256': sourceSha256,
     'sourceInput': configuration.source.toJson(),
-    'downloadUrl': Uri.https(
-      'github.com',
-      '/$repository/releases/download/${configuration.releaseTag}/'
-          '${configuration.file}',
-    ).toString(),
+    if (parts.isEmpty)
+      'downloadUrl': Uri.https(
+        'github.com',
+        '$releasePath${configuration.file}',
+      ).toString()
+    else
+      'parts': <Map<String, Object?>>[
+        for (final part in parts)
+          <String, Object?>{
+            'file': part.file,
+            'exactBytes': part.exactBytes,
+            'sha256': part.sha256,
+            'downloadUrl': Uri.https(
+              'github.com',
+              '$releasePath${part.file}',
+            ).toString(),
+          },
+      ],
     'updatedAt': configuration.updatedAt.toUtc().toIso8601String(),
     'version': configuration.version,
     'modes': supportedRoutingModes,
@@ -613,7 +946,10 @@ Future<void> _promote(File source, File destination) async {
   if (await source.exists()) await source.delete();
 }
 
-Future<bool> _matchesSource(File file, ValhallaRoutingSource source) async =>
+Future<bool> routingSourceMatches(
+  File file,
+  ValhallaRoutingSource source,
+) async =>
     await file.exists() &&
     await file.length() == source.exactBytes &&
     (source.sha256 != null

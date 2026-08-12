@@ -9,13 +9,52 @@ const int routingBackfillSchemaVersion = 2;
 const int expectedBackfillMapRegionCount = 554;
 const int maximumBackfillRegionsPerShard = 3;
 const int maximumBackfillMatrixJobs = 256;
+const int maximumGitHubReleaseAssets = 1000;
+const int standardHostedRunnerRoutingSourceBytes = 1024 * 1024 * 1024;
 const Set<String> catalogMetadataAssetNames = <String>{
   'catalog.json',
   'offline-regions.generated.json',
   'provenance.json',
   'SHA256SUMS',
 };
+const Set<String> joinedCatalogMetadataAssetNames = <String>{
+  ...catalogMetadataAssetNames,
+  'road-catalog.json',
+};
 const String routingPlanAssetName = 'routing-plan.json';
+
+Map<String, Object?> routingDescriptorSidecar({
+  required String planSha256,
+  required String graphId,
+  required List<String> regionIds,
+  required Map<String, Object?> descriptor,
+}) {
+  if (!routingSha256Pattern.hasMatch(planSha256) ||
+      !routingGraphIdPattern.hasMatch(graphId) ||
+      regionIds.isEmpty ||
+      regionIds.toSet().length != regionIds.length ||
+      regionIds.any(
+        (id) => !RegExp(r'^[a-z0-9][a-z0-9._-]{0,62}$').hasMatch(id),
+      )) {
+    throw const AutomationException('Routing sidecar identity is invalid.');
+  }
+  final sorted = regionIds.toList(growable: false)..sort();
+  return <String, Object?>{
+    'schemaVersion': routingBackfillSchemaVersion,
+    'routingPlanSha256': planSha256,
+    'graphId': graphId,
+    'regionIds': sorted,
+    'routing': descriptor,
+  };
+}
+
+String routingDescriptorSidecarContents({
+  required String planSha256,
+  required String graphId,
+  required List<String> regionIds,
+  required Map<String, Object?> descriptor,
+}) =>
+    '${const JsonEncoder.withIndent('  ').convert(routingDescriptorSidecar(planSha256: planSha256, graphId: graphId, regionIds: regionIds, descriptor: descriptor))}\n';
 
 String catalogTagForVersion(String version) {
   if (!RegExp(r'^\d{4}\.\d{2}\.\d+$').hasMatch(version)) {
@@ -45,17 +84,18 @@ List<Map<String, Object?>> routingRegionsFromManifest(
       .where((region) => region['routingBuild'] != null)
       .toList(growable: false);
   final ids = <String>{};
-  final files = <String>{};
   final tags = <String>{};
+  final graphIdentities = <String, String>{};
+  final graphFiles = <String, String>{};
   for (final region in routing) {
     final id = string(region['id'], 'region.id');
     final configuration = ValhallaRoutingRegionConfiguration.fromJson(
       region['routingBuild'],
       field: '$id.routingBuild',
     );
-    if (!ids.add(id) || !files.add(configuration.file)) {
+    if (!ids.add(id)) {
       throw const AutomationException(
-        'Backfill routing region ids and files must be unique.',
+        'Backfill routing region ids must be unique.',
       );
     }
     if (configuration.source.exactBytes >
@@ -64,6 +104,30 @@ List<Map<String, Object?>> routingRegionsFromManifest(
         '$id routing source exceeds the preflight release-build ceiling.',
       );
     }
+    final graphId = configuration.graphId ?? id;
+    final identity = jsonEncode(<String, Object?>{
+      'graphId': graphId,
+      'bounds': configuration.bounds?.toJson(),
+      'file': configuration.file,
+      'releaseTag': configuration.releaseTag,
+      'version': configuration.version,
+      'updatedAt': configuration.updatedAt.toIso8601String(),
+      'source': configuration.source.toJson(),
+    });
+    final previous = graphIdentities[graphId];
+    if (previous != null && previous != identity) {
+      throw AutomationException(
+        'Routing graph $graphId has conflicting alias configurations.',
+      );
+    }
+    graphIdentities[graphId] = identity;
+    final previousGraph = graphFiles[configuration.file];
+    if (previousGraph != null && previousGraph != graphId) {
+      throw AutomationException(
+        '${configuration.file} is shared by different routing graphs.',
+      );
+    }
+    graphFiles[configuration.file] = graphId;
     tags.add(configuration.releaseTag);
   }
   if (routing.isEmpty || tags.length != 1) {
@@ -74,49 +138,87 @@ List<Map<String, Object?>> routingRegionsFromManifest(
   return List.unmodifiable(routing);
 }
 
-// A graph's final size cannot be known without building it. Restricting the
-// immutable input to 512 MiB is the conservative planning guard used by source
-// discovery; build and finalize independently enforce GitHub's exact 2 GiB
-// asset ceiling on the resulting archive.
-const int maximumDiscoveredRoutingSourceBytesForRelease = 512 * 1024 * 1024;
+// The largest reviewed legitimate source is currently Canada at roughly
+// 6.41 GB. This ceiling rejects accidental continent-scale spatial matches,
+// while logical graph output may use multipart transport up to 16 GiB.
+const int maximumDiscoveredRoutingSourceBytesForRelease = 6500 * 1024 * 1024;
+
+List<Map<String, Object?>> routingGraphRepresentatives(
+  List<Map<String, Object?>> routingRegions,
+) {
+  final byGraph = <String, Map<String, Object?>>{};
+  for (final region in routingRegions) {
+    final id = string(region['id'], 'region.id');
+    final configuration = ValhallaRoutingRegionConfiguration.fromJson(
+      region['routingBuild'],
+      field: '$id.routingBuild',
+    );
+    final graphId = configuration.graphId ?? id;
+    final existing = byGraph[graphId];
+    if (existing == null ||
+        id.compareTo(string(existing['id'], 'region.id')) < 0) {
+      byGraph[graphId] = region;
+    }
+  }
+  final result = byGraph.values.toList(growable: false)
+    ..sort(
+      (left, right) => string(
+        left['id'],
+        'region.id',
+      ).compareTo(string(right['id'], 'region.id')),
+    );
+  return List<Map<String, Object?>>.unmodifiable(result);
+}
+
+String routingGraphIdForRegion(Map<String, Object?> region) {
+  final id = string(region['id'], 'region.id');
+  return ValhallaRoutingRegionConfiguration.fromJson(
+        region['routingBuild'],
+        field: '$id.routingBuild',
+      ).graphId ??
+      id;
+}
 
 List<List<String>> planRoutingBackfillShards(
   List<Map<String, Object?>> routingRegions,
 ) {
-  final entries =
-      <({String id, int bytes})>[
-        for (final region in routingRegions)
-          (
-            id: string(region['id'], 'region.id'),
-            bytes: ValhallaRoutingRegionConfiguration.fromJson(
-              region['routingBuild'],
-              field: '${region['id']}.routingBuild',
-            ).source.exactBytes,
-          ),
-      ]..sort((left, right) {
-        final bySize = right.bytes.compareTo(left.bytes);
-        return bySize != 0 ? bySize : left.id.compareTo(right.id);
-      });
-  final count = (entries.length / maximumBackfillRegionsPerShard).ceil();
+  final entries = <({String id, int bytes})>[
+    for (final region in routingGraphRepresentatives(routingRegions))
+      (
+        id: string(region['id'], 'region.id'),
+        bytes: ValhallaRoutingRegionConfiguration.fromJson(
+          region['routingBuild'],
+          field: '${region['id']}.routingBuild',
+        ).source.exactBytes,
+      ),
+  ]..sort((left, right) => left.id.compareTo(right.id));
+  final large = entries
+      .where((entry) => entry.bytes > standardHostedRunnerRoutingSourceBytes)
+      .toList(growable: false);
+  final small = entries
+      .where((entry) => entry.bytes <= standardHostedRunnerRoutingSourceBytes)
+      .toList(growable: false);
+  final smallShardCount = (small.length / maximumBackfillRegionsPerShard)
+      .ceil();
+  final count = large.length + smallShardCount;
   if (count < 1 || count > maximumBackfillMatrixJobs) {
     throw const AutomationException(
       'Routing backfill exceeds the GitHub Actions matrix limit.',
     );
   }
-  final shards = List.generate(count, (_) => <String>[]);
-  final totals = List.filled(count, 0);
-  for (final entry in entries) {
-    var selected = -1;
-    for (var index = 0; index < shards.length; index++) {
-      if (shards[index].length >= maximumBackfillRegionsPerShard) continue;
-      if (selected < 0 || totals[index] < totals[selected]) selected = index;
-    }
-    if (selected < 0) {
-      throw const AutomationException('Could not plan routing shards.');
-    }
-    shards[selected].add(entry.id);
-    totals[selected] += entry.bytes;
-  }
+  final shards = <List<String>>[
+    for (final entry in large) <String>[entry.id],
+    for (var offset = 0; offset < small.length; offset += 3)
+      <String>[
+        for (
+          var index = offset;
+          index < small.length &&
+              index < offset + maximumBackfillRegionsPerShard;
+          index++
+        )
+          small[index].id,
+      ],
+  ];
   for (final shard in shards) {
     shard.sort();
     if (shard.isEmpty || shard.length > maximumBackfillRegionsPerShard) {
@@ -124,6 +226,56 @@ List<List<String>> planRoutingBackfillShards(
     }
   }
   return List.unmodifiable(shards.map(List<String>.unmodifiable));
+}
+
+int maximumRoutingTransportPartsForSource(int sourceExactBytes) {
+  if (sourceExactBytes <= 0 ||
+      sourceExactBytes > maximumDiscoveredRoutingSourceBytesForRelease) {
+    throw const AutomationException('Routing source size is invalid.');
+  }
+  // A graph normally tracks its PBF size closely. Reserve one complete extra
+  // 1.9 GiB part per graph and enforce this same bound before any graph bytes
+  // are uploaded. This makes the release-wide GitHub asset budget knowable at
+  // planning time without pretending Valhalla output size is deterministic.
+  return (sourceExactBytes + routingTransportPartBytes - 1) ~/
+          routingTransportPartBytes +
+      1;
+}
+
+int plannedRoutingReleaseAssetUpperBound(
+  List<Map<String, Object?>> routingRegions,
+) {
+  final graphs = routingGraphRepresentatives(routingRegions);
+  if (graphs.isEmpty) {
+    throw const AutomationException(
+      'Routing release requires at least one graph.',
+    );
+  }
+  return 1 +
+      graphs.length +
+      graphs.fold<int>(0, (sum, region) {
+        final id = string(region['id'], 'region.id');
+        final configuration = ValhallaRoutingRegionConfiguration.fromJson(
+          region['routingBuild'],
+          field: '$id.routingBuild',
+        );
+        return sum +
+            maximumRoutingTransportPartsForSource(
+              configuration.source.exactBytes,
+            );
+      });
+}
+
+void validateRoutingReleaseAssetBudget(
+  List<Map<String, Object?>> routingRegions,
+) {
+  final upperBound = plannedRoutingReleaseAssetUpperBound(routingRegions);
+  if (upperBound > maximumGitHubReleaseAssets) {
+    throw AutomationException(
+      'Routing release requires up to $upperBound assets, exceeding GitHub\'s '
+      '$maximumGitHubReleaseAssets-asset limit.',
+    );
+  }
 }
 
 Map<String, Map<String, Object?>> validateBackfillBaseCatalog({
@@ -216,6 +368,93 @@ Map<String, Map<String, Object?>> validateBackfillBaseCatalog({
   return Map.unmodifiable(result);
 }
 
+/// Returns the canonical road-only catalog for either a road release catalog
+/// or a previously synchronized joined catalog.
+///
+/// The routing workflow is deliberately rerunnable after publication. Since a
+/// successful run synchronizes joined metadata to `catalog.json`, a recovery
+/// run must remove only the fully validated joined fields before recreating
+/// `road-catalog.json`. This prevents routing metadata from leaking into the
+/// stable road-only fallback while retaining the exact map descriptors.
+Map<String, Object?> normalizeBackfillRoadCatalog({
+  required Map<String, Object?> catalog,
+  required Map<String, Object?> manifest,
+  required String repository,
+  required String mapReleaseTag,
+}) {
+  final records = validateBackfillBaseCatalog(
+    catalog: catalog,
+    manifest: manifest,
+    repository: repository,
+    mapReleaseTag: mapReleaseTag,
+  );
+  const joinedKeys = <String>{
+    'combinedExactBytes',
+    'routingAvailable',
+    'routing',
+  };
+  final hasJoinedFields = records.values.any(
+    (record) => joinedKeys.any(record.containsKey),
+  );
+  if (hasJoinedFields) {
+    final regions = <String, Map<String, Object?>>{
+      for (final region in objectList(manifest['regions'], 'manifest.regions'))
+        string(region['id'], 'manifest.id'): region,
+    };
+    final builder = ValhallaRoutingBuilderConfiguration.fromJson(
+      manifest['routingBuilder'],
+    );
+    for (final entry in records.entries) {
+      final id = entry.key;
+      final record = entry.value;
+      final region = regions[id]!;
+      final expectedRouting = region['routingBuild'] != null;
+      final routingAvailable = record['routingAvailable'];
+      final hasRouting = record['routing'] != null;
+      final combined = record['combinedExactBytes'];
+      final mapBytes = integer(record['exactBytes'], '$id.exactBytes');
+      if (routingAvailable is! bool ||
+          routingAvailable != expectedRouting ||
+          hasRouting != expectedRouting ||
+          combined is! int) {
+        throw AutomationException(
+          '$id joined catalog fields are incomplete or inconsistent.',
+        );
+      }
+      var expectedCombined = mapBytes;
+      if (expectedRouting) {
+        final descriptor = object(record['routing'], '$id.routing');
+        validateBackfillRoutingDescriptor(
+          descriptor: descriptor,
+          region: region,
+          repository: repository,
+          engineVersion: builder.version,
+        );
+        expectedCombined += integer(
+          descriptor['exactBytes'],
+          '$id.routing.exactBytes',
+        );
+      }
+      if (combined != expectedCombined) {
+        throw AutomationException('$id combined map/routing size is invalid.');
+      }
+    }
+  }
+  return <String, Object?>{
+    'schemaVersion': catalog['schemaVersion'],
+    'generatedAt': catalog['generatedAt'],
+    'archiveFormat': catalog['archiveFormat'],
+    'tileType': catalog['tileType'],
+    'regions': <Map<String, Object?>>[
+      for (final record in objectList(catalog['regions'], 'catalog.regions'))
+        <String, Object?>{
+          for (final entry in record.entries)
+            if (!joinedKeys.contains(entry.key)) entry.key: entry.value,
+        },
+    ],
+  };
+}
+
 void validateBackfillRoutingDescriptor({
   required Map<String, Object?> descriptor,
   required Map<String, Object?> region,
@@ -228,17 +467,65 @@ void validateBackfillRoutingDescriptor({
     field: '$id.routingBuild',
   );
   final bytes = integer(descriptor['exactBytes'], '$id.routing.exactBytes');
+  final expectedBase =
+      '/$repository/releases/download/${configuration.releaseTag}/';
   final expectedUrl = Uri.https(
     'github.com',
-    '/$repository/releases/download/${configuration.releaseTag}/'
-        '${configuration.file}',
+    '$expectedBase${configuration.file}',
   ).toString();
+  final rawParts = descriptor['parts'];
+  var validTransport = false;
+  if (rawParts == null) {
+    validTransport =
+        bytes <= maximumGitHubReleaseAssetBytes &&
+        descriptor['downloadUrl'] == expectedUrl;
+  } else if (rawParts is List &&
+      rawParts.length >= 2 &&
+      bytes > maximumGitHubReleaseAssetBytes &&
+      !descriptor.containsKey('downloadUrl')) {
+    var sum = 0;
+    validTransport = true;
+    for (var index = 0; index < rawParts.length; index++) {
+      if (rawParts[index] is! Map) {
+        validTransport = false;
+        break;
+      }
+      final part = (rawParts[index] as Map).cast<String, Object?>();
+      final expectedName =
+          '${configuration.file}.part'
+          '${(index + 1).toString().padLeft(3, '0')}';
+      final partBytes = part['exactBytes'];
+      final partSha = part['sha256'];
+      final partUrl = part['downloadUrl'];
+      if (part['file'] != expectedName ||
+          !routingPartPattern.hasMatch(expectedName) ||
+          partBytes is! int ||
+          partBytes <= 0 ||
+          partBytes > maximumGitHubReleaseAssetBytes ||
+          partSha is! String ||
+          !routingSha256Pattern.hasMatch(partSha) ||
+          partUrl !=
+              Uri.https(
+                'github.com',
+                '$expectedBase$expectedName',
+              ).toString()) {
+        validTransport = false;
+        break;
+      }
+      sum += partBytes;
+    }
+    validTransport = validTransport && sum == bytes;
+  }
   if (descriptor['format'] != 'valhalla-tar' ||
       descriptor['engine'] != routingEngine ||
       descriptor['engineVersion'] != engineVersion ||
+      (configuration.graphId != null &&
+          descriptor['graphId'] != configuration.graphId) ||
+      (configuration.graphId == null && descriptor.containsKey('graphId')) ||
+      !deepJsonEquals(descriptor['bounds'], configuration.bounds?.toJson()) ||
       descriptor['file'] != configuration.file ||
       bytes <= 0 ||
-      bytes > maximumGitHubReleaseAssetBytes ||
+      bytes > maximumRoutingAssetBytes ||
       !routingSha256Pattern.hasMatch(
         string(descriptor['sha256'], '$id.routing.sha256'),
       ) ||
@@ -249,7 +536,7 @@ void validateBackfillRoutingDescriptor({
         descriptor['sourceInput'],
         configuration.source.toJson(),
       ) ||
-      descriptor['downloadUrl'] != expectedUrl ||
+      !validTransport ||
       descriptor['updatedAt'] != configuration.updatedAt.toIso8601String() ||
       descriptor['version'] != configuration.version ||
       !deepJsonEquals(descriptor['modes'], supportedRoutingModes) ||
@@ -270,8 +557,14 @@ Map<String, Object?> buildJoinedBackfillCatalog({
   required String repository,
   required String mapReleaseTag,
 }) {
-  final base = validateBackfillBaseCatalog(
+  final roadCatalog = normalizeBackfillRoadCatalog(
     catalog: baseCatalog,
+    manifest: manifest,
+    repository: repository,
+    mapReleaseTag: mapReleaseTag,
+  );
+  final base = validateBackfillBaseCatalog(
+    catalog: roadCatalog,
     manifest: manifest,
     repository: repository,
     mapReleaseTag: mapReleaseTag,
@@ -319,7 +612,7 @@ Map<String, Object?> buildJoinedBackfillCatalog({
   }
   return <String, Object?>{
     'schemaVersion': 2,
-    'generatedAt': baseCatalog['generatedAt'],
+    'generatedAt': roadCatalog['generatedAt'],
     'archiveFormat': 'pmtiles',
     'tileType': 'mvt',
     'regions': joined,

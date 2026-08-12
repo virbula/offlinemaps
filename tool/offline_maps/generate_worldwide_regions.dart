@@ -351,7 +351,9 @@ class RoutingDatasetConfiguration {
     required this.version,
     required this.updatedAt,
     required this.releaseTag,
-    required this.sources,
+    required this.graphs,
+    required this.graphBounds,
+    required this.regionGraphs,
     required this.minimumRegionCount,
     required this.minimumCountryCount,
     required this.requiredContinents,
@@ -370,6 +372,9 @@ class RoutingDatasetConfiguration {
       'updatedAt',
       'releaseTag',
       'sources',
+      'graphs',
+      'graphBounds',
+      'regionGraphs',
     }, 'routingDataset');
     if (map['enabled'] is! bool ||
         map['required'] is! bool ||
@@ -388,7 +393,26 @@ class RoutingDatasetConfiguration {
         'YYYY.MM.REVISION and routing-YYYY.MM.REVISION values.',
       );
     }
-    final rawSources = _object(map['sources'], 'routingDataset.sources');
+    final rawSources = map['sources'] == null
+        ? <String, Object?>{}
+        : _object(map['sources'], 'routingDataset.sources');
+    final rawGraphs = map['graphs'] == null
+        ? <String, Object?>{}
+        : _object(map['graphs'], 'routingDataset.graphs');
+    final rawRegionGraphs = map['regionGraphs'] == null
+        ? <String, Object?>{}
+        : _object(map['regionGraphs'], 'routingDataset.regionGraphs');
+    final rawGraphBounds = map['graphBounds'] == null
+        ? <String, Object?>{}
+        : _object(map['graphBounds'], 'routingDataset.graphBounds');
+    if (rawSources.isNotEmpty &&
+        (rawGraphs.isNotEmpty ||
+            rawGraphBounds.isNotEmpty ||
+            rawRegionGraphs.isNotEmpty)) {
+      throw const WorldwideRegionException(
+        'routingDataset cannot mix legacy sources with graphs/regionGraphs.',
+      );
+    }
     final minimumRegionCount = _integer(
       map['minimumRegionCount'],
       'routingDataset.minimumRegionCount',
@@ -420,27 +444,91 @@ class RoutingDatasetConfiguration {
         'routingDataset coverage contract is invalid.',
       );
     }
-    final sources = <String, ValhallaRoutingSource>{};
-    for (final entry in rawSources.entries) {
+    final sourceValues = rawSources.isNotEmpty ? rawSources : rawGraphs;
+    final sourceField = rawSources.isNotEmpty ? 'sources' : 'graphs';
+    final graphs = <String, ValhallaRoutingSource>{};
+    for (final entry in sourceValues.entries) {
       if (!RegExp(r'^[a-z0-9][a-z0-9._-]{0,62}$').hasMatch(entry.key)) {
         throw WorldwideRegionException(
-          'routingDataset source id ${entry.key} is unsafe.',
+          'routingDataset graph id ${entry.key} is unsafe.',
         );
       }
       try {
-        sources[entry.key] = ValhallaRoutingSource.fromJson(
+        graphs[entry.key] = ValhallaRoutingSource.fromJson(
           entry.value,
-          'routingDataset.sources.${entry.key}',
+          'routingDataset.$sourceField.${entry.key}',
         );
       } on RoutingBuildException catch (error) {
         throw WorldwideRegionException(error.message);
       }
     }
+    final regionGraphs = <String, String>{};
+    final graphBounds = <String, RoutingCoverageBounds>{};
+    if (rawSources.isNotEmpty) {
+      for (final graphId in graphs.keys) {
+        regionGraphs[graphId] = graphId;
+      }
+    } else {
+      if (rawGraphs.isNotEmpty &&
+          rawGraphBounds.keys.toSet().length != graphs.length) {
+        throw const WorldwideRegionException(
+          'routingDataset.graphBounds must cover every graph exactly.',
+        );
+      }
+      for (final entry in rawGraphBounds.entries) {
+        if (!graphs.containsKey(entry.key)) {
+          throw WorldwideRegionException(
+            'routingDataset.graphBounds references unknown graph ${entry.key}.',
+          );
+        }
+        try {
+          graphBounds[entry.key] = RoutingCoverageBounds.fromJson(
+            entry.value,
+            'routingDataset.graphBounds.${entry.key}',
+          );
+        } on RoutingBuildException catch (error) {
+          throw WorldwideRegionException(error.message);
+        }
+      }
+      for (final entry in rawRegionGraphs.entries) {
+        if (!RegExp(r'^[a-z0-9][a-z0-9._-]{0,62}$').hasMatch(entry.key) ||
+            entry.value is! String ||
+            !RegExp(
+              r'^[a-z0-9][a-z0-9._-]{0,62}$',
+            ).hasMatch(entry.value! as String)) {
+          throw WorldwideRegionException(
+            'routingDataset regionGraphs entry ${entry.key} is unsafe.',
+          );
+        }
+        final graphId = entry.value! as String;
+        if (!graphs.containsKey(graphId)) {
+          throw WorldwideRegionException(
+            'routingDataset region ${entry.key} references unknown graph '
+            '$graphId.',
+          );
+        }
+        regionGraphs[entry.key] = graphId;
+      }
+    }
+    final referencedGraphs = regionGraphs.values.toSet();
+    final orphanGraphs =
+        graphs.keys
+            .where((graphId) => !referencedGraphs.contains(graphId))
+            .toList(growable: false)
+          ..sort();
+    if (orphanGraphs.isNotEmpty) {
+      throw WorldwideRegionException(
+        'routingDataset contains unreferenced graphs: '
+        '${orphanGraphs.join(', ')}.',
+      );
+    }
     return RoutingDatasetConfiguration(
       version: version,
       updatedAt: _utcTimestamp(map['updatedAt'], 'routingDataset.updatedAt'),
       releaseTag: releaseTag,
-      sources: Map.unmodifiable(sources),
+      graphs: Map.unmodifiable(graphs),
+      graphBounds: Map.unmodifiable(graphBounds),
+      regionGraphs: Map.unmodifiable(regionGraphs),
       minimumRegionCount: minimumRegionCount,
       minimumCountryCount: minimumCountryCount,
       requiredContinents: Set.unmodifiable(requiredContinents),
@@ -450,7 +538,9 @@ class RoutingDatasetConfiguration {
   final String version;
   final DateTime updatedAt;
   final String releaseTag;
-  final Map<String, ValhallaRoutingSource> sources;
+  final Map<String, ValhallaRoutingSource> graphs;
+  final Map<String, RoutingCoverageBounds> graphBounds;
+  final Map<String, String> regionGraphs;
   final int minimumRegionCount;
   final int minimumCountryCount;
   final Set<String> requiredContinents;
@@ -478,7 +568,7 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
   final routingEnabled = rawRoutingDataset?['enabled'] == true;
   if (routingEnabled &&
       routingDataset != null &&
-      routingDataset.sources.isNotEmpty) {
+      routingDataset.graphs.isNotEmpty) {
     try {
       ValhallaRoutingBuilderConfiguration.fromJson(manifest['routingBuilder']);
     } on RoutingBuildException catch (error) {
@@ -575,6 +665,7 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
         subdivision: subdivision,
         suffix: part.suffix,
       );
+      final routingGraphId = routingDataset?.regionGraphs[id];
       regions.add(<String, Object?>{
         'enabled': true,
         'file': file,
@@ -604,15 +695,17 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
           countryCode: countryCode,
           admin0: admin0,
         ),
-        if (routingEnabled &&
-            routingDataset != null &&
-            routingDataset.sources.containsKey(id))
+        if (routingEnabled && routingDataset != null && routingGraphId != null)
           'routingBuild': <String, Object?>{
-            'file': '$id-routing-${routingDataset.version}.vtiles.tar',
+            'graphId': routingGraphId,
+            if (routingDataset.graphBounds[routingGraphId] case final bounds?)
+              'bounds': bounds.toJson(),
+            'file':
+                '$routingGraphId-routing-${routingDataset.version}.vtiles.tar',
             'releaseTag': routingDataset.releaseTag,
             'version': routingDataset.version,
             'updatedAt': routingDataset.updatedAt.toIso8601String(),
-            'source': routingDataset.sources[id]!.toJson(),
+            'source': routingDataset.graphs[routingGraphId]!.toJson(),
           },
       });
       if (subdivision) {
@@ -646,7 +739,7 @@ Future<WorldwideRegionGenerationResult> generateWorldwideRegions({
   });
   final generatedIds = regions.map((region) => region['id']! as String).toSet();
   final unknownRoutingIds =
-      routingDataset?.sources.keys
+      routingDataset?.regionGraphs.keys
           .where((id) => !generatedIds.contains(id))
           .toList(growable: false) ??
       const <String>[];

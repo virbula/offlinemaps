@@ -2,7 +2,8 @@
 
 This repository owns the worldwide road-map release automation consumed by
 EasyElevation. It extracts 554 bounded PMTiles packs from the official retained
-Protomaps planet archive and builds matching Valhalla routing graphs from
+Protomaps planet archive and builds 297 shared Valhalla routing graphs for 549
+map aliases from
 immutable Geofabrik/OpenStreetMap extracts. Maps and graphs use coordinated
 immutable `maps-*` and `routing-*` releases; the latest catalog joins them into
 one logical regional download and identifies the Valhalla engine version needed

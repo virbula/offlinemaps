@@ -1,172 +1,150 @@
 # Offline-map release automation
 
-## Schedule and lifecycle
+## Monthly road maps
 
-`offline-maps.yml` runs at `03:17 UTC` on the eighth day of every month and can
-also be started manually. GitHub schedules are best-effort: a run can start
-late during service load, public-repository schedules can be disabled after 60
-days without repository activity, and a missed run should be started with
-**Run workflow** using `mode=update`.
+`.github/workflows/offline-maps.yml` runs at `03:17 UTC` on the eighth day of
+each month and can also be dispatched manually. It publishes the worldwide
+road maps independently of routing:
 
-The unattended update path:
+1. Select and validate an immutable retained Protomaps build.
+2. Regenerate and validate exactly 554 Natural Earth-derived regions.
+3. Build at most three regions in each of 185 shards (`max-parallel: 4`).
+4. Verify each PMTiles archive, upload it directly to the numeric draft
+   release, and delete runner-local map bytes.
+5. Require exactly one small report per shard, validate all 554 remote map
+   assets, publish the four metadata assets last, verify public tagged URLs,
+   and promote the road release.
+6. Atomically sync verified metadata to `main`, then dispatch the coordinated
+   routing workflow.
 
-1. Reads only `https://build-metadata.protomaps.dev/builds.json`, chooses the
-   newest compatible retained record with exact bytes, lowercase BLAKE3, a
-   `YYYYMMDD.pmtiles` key, and Protomaps v4 tileset.
-2. Revalidates that record against the feed and validates the immutable
-   `https://build.protomaps.com/YYYYMMDD.pmtiles` HEAD response and byte-range
-   support. The full source date deterministically defines the version/tag
-   (`YYYY.MM.DAY`), so two retained sources in one month cannot collide and a
-   rerun cannot silently change an immutable release.
-3. Regenerates the pinned Natural Earth 5.1.2 country/subdivision geometry and
-   asserts exactly 554 unique packs.
-4. Resolves exact country/subdivision matches from Geofabrik's machine index to
-   immutable dated PBF URLs and pins Content-Length plus the provider MD5. This
-   preparation never downloads PBF bodies and enforces configured minimum
-   region/country coverage across Africa, Asia, Europe, North America, Oceania,
-   and South America.
-5. Assigns at most three regions to each of 185 size-balanced matrix shards
-   (`max-parallel: 4`, below GitHub's 256-job matrix cap).
-6. Each Ubuntu 24.04 runner uses the SHA-256-pinned PMTiles 1.30.1 CLI to range
-   extract one pack, run `pmtiles verify`, independently inspect its header and
-   metadata, upload directly to the numeric draft release ID, verify GitHub's
-   reported size/SHA-256, and delete the local archive before the next pack.
-   PMTiles are never put into Actions artifacts or caches. Peak disk remains
-   below the standard hosted runner's 14 GB limit.
-   A routing-enabled region also downloads one PBF, verifies size/provider
-   digest, records a computed SHA-256, builds with the digest-pinned Valhalla
-   image and no container network, uploads the graph to a coordinated routing
-   draft, then deletes both PBF and graph before the next region. Catalog
-   descriptors carry the configured Valhalla engine version so an app cannot
-   load a graph built for an incompatible routing runtime.
-7. Each shard uploads only a tiny, uniquely named JSON build report as a
-   30-day Actions artifact. The finalizer requires exactly 185 reports and
-   exactly one record for each of the 554 regions; duplicates and extras fail.
-   Artifact names use the stable workflow `run_id` (not `run_attempt`) and
-   overwrite the same plan/shard slot. A rerun safely retains completed
-   reports; if a routing asset was uploaded but its shard report was lost, the
-   workflow fails closed and requires a fresh release version/tag because
-   Valhalla graph bytes are not guaranteed reproducible across separate builds.
-   Before downloading a plan,
-   the prepare job uses its `actions: read` permission to query that exact
-   run/name through the GitHub REST API. Exactly one non-expired artifact for
-   the current run may be reused; duplicates, expired or malformed results
-   fail closed. An absent artifact is accepted only on attempt 1, when the plan
-   has not been prepared yet. A later attempt with no retained plan fails
-   instead of discovering a potentially different source.
-8. The finalizer verifies and publishes the exact routing release first with
-   `make_latest=false`, including OSM/Geofabrik/ODbL release notes, and checks
-   every public graph before exposing a catalog that references it.
-9. The finalizer paginates the numeric map release assets endpoint at 100 assets per
-   page, verifies an exact set of 554 PMTiles and their byte sizes/SHA-256
-   digests, creates the catalog/provenance/checksums, and uploads `catalog.json`
-   last. It then repeats a fresh exact 558-asset check.
-10. The map release becomes public with `make_latest=false`. Tagged URLs and range
-   behavior are verified before a second PATCH makes it latest. The stable
-   `releases/latest/download/catalog.json` bytes are then verified.
+The road build uses a routing-disabled planning manifest, but the
+`config/offline-map-build.json` synchronized to `main` retains
+`routingDataset.enabled/required=true`, advances its version/timestamp to the
+new map release, clears old graph mappings, and sets `routing-<version>`. Sync
+validates this transition and fails closed if routing was accidentally disabled
+or left on the prior version. A routing failure therefore cannot invalidate or
+delay an already verified road-map release.
 
-After all remote verification and latest promotion succeed, the final job uses
-GitHub's Git Data API to create one atomic metadata/config commit on `main`.
-The ref update is non-force and allowed only when `main` still equals the
-workflow's exact checkout SHA; concurrent changes or branch protection stop the
-sync instead of being overwritten. In that case the immutable release remains
-valid and an owner can reconcile the generated metadata manually. This monthly
-commit also prevents GitHub from disabling the public repository schedule for
-60 days of inactivity. The workflow never force pushes, auto-merges, or
-bypasses branch protection.
+The stable road-only catalog is also preserved as `road-catalog.json` in a
+joined catalog release. The application first reads joined `catalog.json` and
+can fall back to `road-catalog.json` when routing is unavailable.
 
-## Manual inputs
+## Worldwide routing backfill
 
-- `mode=update`: discover and publish the latest compatible retained source.
-- `mode=resume-existing`: resume the source/tag in
-  `config/offline-map-build.json`. The tracked catalog, generated catalog,
-  provenance, and checksums are authoritative. Existing and rebuilt packs must
-  match them exactly; the workflow never replaces a conflicting asset. Set
-  `target_commit` to the original full 40-character release target (for the
-  initial release: `f3f06740dc02596944c2f2a9da59887d942e4cf2`).
-  The checked-in `build/expected/manifest-maps-2026.08.1.json` preserves the
-  original GeoJSON descriptor paths and manifest SHA used by provenance; it is
-  intentionally immutable and replaces the regenerated planning manifest only
-  for this first-release takeover.
-- `dry_run=true`: validate source, geometry, and the matrix without creating or
-  mutating a release.
-- `finalize_existing=true`: recovery only. Supply `recovery_tag` and the
-  original `target_commit`. If a release became public with
-  `make_latest=false` but CDN verification interrupted the original run, this
-  downloads all four metadata files from that exact release, validates their
-  GitHub digests/schema/provenance/checksums and the exact 558 remote assets,
-  retries public checks for all 554 maps and four metadata files, then promotes
-  it to latest. It is independent of the branch's currently tracked release
-  and never adds, replaces, or deletes an asset.
+`.github/workflows/routing-backfill.yml` is a trusted `workflow_dispatch` flow
+for `virbula/offlinemaps` on `main`. It currently resolves 549 map aliases to
+297 unique Valhalla graphs; four remote territories (`GS`, `IO`, `PM`, `TF`)
+and the world overview remain explicitly map-only. Matching prefers exact ISO
+country/subdivision metadata. Its conservative spatial fallback checks every
+polygon vertex and boundary, respects holes and concavity, handles the
+antimeridian, and never accepts a continent graph.
 
-Because the workflow uses the numeric release ID and checks tag, target commit,
-draft/prerelease state before every mutation, reruns are idempotent. A matching
-asset with a retained exact descriptor is kept; an absent one is
-built/uploaded; and any mismatch stops the run. Valhalla 3.6.3 graph bytes are
-not reproducible across builds, so the graph upload atomically records its PBF
-source SHA-256 in the GitHub asset label. A rerun can safely reconstruct the
-descriptor from that label plus GitHub's exact graph size and SHA-256 without
-rebuilding or replacing the graph.
+Before the first graph upload, preparation creates immutable
+`routing-plan.json`. It pins every dated Geofabrik PBF by exact byte length and
+provider MD5, and its SHA-256 binds every graph asset label and canonical
+descriptor sidecar. The pipeline prefetches and validates the complete unique
+source corpus into an exact-plan cache before uploading any graph. If a dated
+URL disappears, the `*-latest` mirror is accepted only when its bytes still
+match the same pinned size and digest.
 
-## Initial routing backfill recovery
+Geofabrik index, redirect/HEAD, update-state, and checksum reads use five
+bounded attempts with exponential backoff. Transport timeouts and transient
+HTTP failures become normal automation errors rather than uncaught process
+failures. Local planning atomically caches the provider index and each
+completed immutable source resolution under the map version/timestamp, so a
+rerun resumes without repeating already completed discovery work.
 
-`routing-backfill.yml` adds Valhalla 3.6.3 graphs to the existing immutable
-`maps-2026.08.1` release without republishing its 554 PMTiles assets. Before the
-first graph upload, the routing draft receives `routing-plan.json`, containing
-the complete generated manifest with every immutable dated Geofabrik PBF URL,
-exact byte count, and MD5. GitHub's size/SHA-256 for this control asset is
-recorded in the Actions plan and verified by every shard and the finalizer.
+The source cache and graph jobs run on `[self-hosted, macOS, ARM64]`. The runner
+must expose at least 60 GiB host RAM, 60 GiB Docker RAM, and at least the larger
+of 100 GiB or six times the current maximum source in free disk. Docker runs the
+platform-specific, digest-pinned Valhalla 3.6.3 `linux/amd64` image under x86
+emulation, with container networking disabled and build concurrency 2. The
+builder pull is skipped when that exact image is installed and otherwise uses
+five bounded attempts before failing.
 
-Each graph asset label binds both the control-plan SHA-256 and the computed PBF
-SHA-256. A fresh dispatch or rerun with existing graph assets downloads the
-control asset through the authenticated GitHub API, verifies its bytes, and
-uses it instead of resolving moving `*-latest` sources. Missing, duplicate, or
-mismatched plans and labels stop before matrix uploads begin. An empty pair of
-drafts can be safely retargeted; once the control plan exists, the original
-coordinated target is retained.
+The current real-source plan produces 111 deterministic logical shards, but each workflow run
+builds only the next incomplete shard (one large graph or up to three small
+graphs). A successful run dispatches the next exact-plan iteration. The shared
+`offlinemaps-release` concurrency queue serializes road, routing, and
+continuation runs. The iteration counter is bounded at 297.
 
-Recovery permits routing-draft/catalog-draft, routing-public/catalog-draft, and
-routing-public/catalog-public states. A public routing release is read-only;
-the matrix only reconstructs reports from its exact assets. Even when both
-releases are already public and the catalog is latest, the workflow regenerates
-reports, verifies every remote digest/label and public URL, and runs metadata
-sync. That routing metadata sync recognizes only its own exact prior one-parent
-commit by parent SHA, commit message, and full candidate tree SHA; unrelated
-branch movement remains fail-closed.
+Each logical archive may be up to 16 GiB. Archives above GitHub's per-asset
+limit are split into deterministic 1,900 MiB parts. One canonical sidecar
+records aliases, logical size/SHA-256, source provenance, and ordered part
+sizes/SHA-256 values. Preparation computes a source-derived upper bound for
+the complete release (plan + one sidecar per graph + reserved transport parts)
+and requires it to fit GitHub's 1,000-asset limit before any graph upload. The
+same per-graph part allowance is enforced before that graph is uploaded. The
+current 297-graph plan reserves at most 903 release assets.
 
-## Repository security
+Continuation does not depend on old Actions reports. Intermediate runs
+paginate the exact draft once and use an uploaded, digest-bearing, plan-bound
+sidecar as that graph's atomic completion marker. Once all 297 markers exist,
+the final preparation run downloads and hashes every canonical sidecar, checks
+every GitHub-reported transport size/SHA-256 and plan-bound label, and
+regenerates all reports from that exact remote state. If an upload is
+interrupted before its sidecar exists, only that graph's plan-bound incomplete
+assets may be removed from the still-draft release; sidecar-complete graphs are
+immutable. Local recovery bytes remain in the plan cache until the sidecar and
+all transport assets validate remotely.
 
-- Repository-level workflow token default should be **read-only** and “Allow
-  GitHub Actions to create and approve pull requests” should be disabled.
-- The workflow declares top-level `contents: read`; only prepare/build/finalize
-  mutation jobs request `contents: write`. It requests no ID token, package,
-  action-management, or PR-review permission.
-- Every third-party action is pinned to a full commit SHA and checkout uses
-  `persist-credentials: false`.
-- Dart is exact-versioned, dependencies are locked, and CI uses
-  `dart pub get --enforce-lockfile`.
-- The release workflow has a repository-wide concurrency lock with
-  `cancel-in-progress: false`.
-- Workflow-dispatch values enter scripts through environment variables and are
-  strictly validated. Pull requests cannot execute release mutations or obtain
-  release secrets.
-- Protect `.github/`, `config/`, release tooling, and `pubspec.lock` with the
-  included CODEOWNERS file. If branch protection is enabled, require CODEOWNER
-  review but do not configure the workflow to bypass it.
+Per-run Actions artifacts retain only the manifest, release identity, stable
+road catalog, and final reconstructed reports. Bulky generated boundary files
+are omitted and these artifacts expire after seven days because the immutable
+plan also lives in the routing draft and continuation reconstructs progress
+from verified release assets.
 
-## Local validation
+After all graphs validate, the finalizer publishes the routing release with
+`make_latest=false`, builds a separate `catalog-<version>` release joining the
+immutable road and routing URLs, verifies it, and makes that catalog release
+latest. GitHub's API digest verifies complete graph/part bytes; the public CDN
+probe verifies availability and exact transport length. Small public
+descriptors and catalog metadata are downloaded and SHA-256 verified in full.
+
+Only after successful publication and metadata sync does a self-hosted cleanup
+job remove the exact 64-hex plan cache directory whose `ready.json` marker
+matches that plan. It never recursively removes the cache root or another
+plan. This retains recovery data across failures while preventing roughly
+90 GiB from accumulating each month.
+
+## Recovery and safety
+
+The workflows use immutable numeric release IDs and verify tag, target commit,
+draft/prerelease state, exact asset sets, labels, sizes, and digests before
+mutation. Empty coordinated drafts may be retargeted. Once a plan exists, its
+original target and bytes are authoritative.
+
+The routing release and joined catalog can resume from these states:
+
+- routing draft / catalog draft;
+- routing public / catalog draft; or
+- routing public / catalog public.
+
+A public routing release is read-only. Metadata sync uses a non-force Git Data
+API ref update and succeeds only when `main` is the exact expected checkout (or
+the exact recognized prior automation commit). Branch movement fails closed.
+If publication succeeded but metadata sync or cache cleanup failed, a no-op
+rerun still revalidates both releases, normalizes the synchronized joined
+catalog back to its exact road-only base, retries metadata sync, and then
+cleans only the matching plan cache.
+
+The road workflow's `resume-existing` and `finalize_existing` modes remain for
+the original immutable map release and public-CDN recovery. Dry runs validate
+planning without creating or mutating releases.
+
+Security controls include exact action commit pins, locked Dart dependencies,
+`persist-credentials: false`, top-level read-only contents, narrow job-level
+write permissions, strict dispatch validation, no pull-request release path,
+and no force push or asset clobber.
+
+## Validation
 
 ```sh
 make check
 ```
 
-The test suite verifies the 554-to-185 shard plan and the 256-job bound,
-deterministic versioning, release identity, exact asset digest matching,
-duplicate/missing report rejection, and canonical JSON comparisons.
-
-Map and graph releases remain separate because the paired global set can exceed
-GitHub's 1,000-asset release cap. The latest map catalog is the single join
-point. Recovery validates the exact public asset sets and descriptors in both
-releases before promoting the map release. Regions lacking an exact safe
-Geofabrik extract remain explicit map-only entries; the configured worldwide
-coverage contract prevents an unexpectedly sparse routing release.
+Tests cover deterministic road/routing shard plans, worldwide source
+selection, concave/hole/dateline geometry, monthly metadata handoff, source
+prefetch and capacity gates, canonical multipart descriptors and
+reconstruction, exact-1,000 asset pagination, plan-cache target safety, release
+state recovery, and atomic metadata synchronization.

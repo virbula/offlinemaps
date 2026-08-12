@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.0+1 — 2026-08-12
+
 - Added paired regional Valhalla routing-pack build, validation, publication,
   recovery, and catalog metadata alongside the existing PMTiles pipeline.
 - Added exact routing availability, graph/combined sizes, SHA-256, source
@@ -19,6 +21,23 @@
 - Added fail-closed recovery for empty draft retargeting,
   routing-public/catalog-draft completion, exact public no-op verification, and
   idempotent atomic metadata synchronization.
+- Added a serialized, resumable self-hosted routing workflow that builds one
+  bounded shard at a time and continues from immutable, plan-bound release
+  sidecars instead of depending on previous Actions artifacts.
+- Added exact 1,000-asset budgeting, deterministic 1,900 MiB multipart graph
+  transport, full remote digest verification, and safe interrupted-upload
+  cleanup before a routing or joined-catalog release can become public.
+- Added bounded Geofabrik discovery retries, immutable dated-source caching,
+  complete-source prefetch, host/Docker capacity checks, and exact-plan cache
+  cleanup after successful publication.
+- Pinned the Valhalla 3.6.3 Linux/amd64 child image digest so Apple Silicon
+  builders consistently use the reviewed x86 image without Docker Desktop's
+  multi-architecture digest collision.
+- Kept monthly PMTiles road publication independent of routing, published a
+  stable road-only catalog fallback, and made the joined catalog release the
+  latest only after every graph and catalog checksum validates.
+- Verified the live worldwide plan at 297 unique graphs for 549 regional map
+  aliases, 111 serialized shards, and a conservative 903 release assets.
 
 ## 1.1.1+1 — 2026-08-11
 

@@ -248,6 +248,68 @@ void main() {
     expect(patched, isFalse);
   });
 
+  test('asset pagination accepts exactly 1000 and probes page 11', () async {
+    final pages = <int>[];
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        final page = int.parse(uri.queryParameters['page']!);
+        pages.add(page);
+        return (
+          statusCode: 200,
+          body: jsonEncode(<Object?>[
+            if (page <= 10)
+              for (var index = 0; index < 100; index++)
+                <String, Object?>{
+                  'id': (page - 1) * 100 + index + 1,
+                  'name': 'asset-$page-$index',
+                  'size': 1,
+                  'digest': 'sha256:${'a' * 64}',
+                  'state': 'uploaded',
+                  'label': null,
+                },
+          ]),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    expect(await client.listAssets(42), hasLength(1000));
+    expect(pages, List<int>.generate(11, (index) => index + 1));
+  });
+
+  test('asset pagination rejects an asset on page 11', () async {
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        final page = int.parse(uri.queryParameters['page']!);
+        final count = page <= 10 ? 100 : 1;
+        return (
+          statusCode: 200,
+          body: jsonEncode(<Object?>[
+            for (var index = 0; index < count; index++)
+              <String, Object?>{
+                'id': (page - 1) * 100 + index + 1,
+                'name': 'asset-$page-$index',
+                'size': 1,
+                'digest': 'sha256:${'a' * 64}',
+                'state': 'uploaded',
+                'label': null,
+              },
+          ]),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.listAssets(42),
+      throwsA(isA<AutomationException>()),
+    );
+  });
+
   test('release assets retain an optional atomic provenance label', () {
     final asset = GitHubReleaseAsset.fromJson(<String, Object?>{
       'id': 7,

@@ -6,7 +6,7 @@ const _builder = ValhallaRoutingBuilderConfiguration(
   dockerExecutable: 'docker',
   image:
       'ghcr.io/valhalla/valhalla:3.6.3@sha256:'
-      '2b19ea46551a9687b245022551183829d817fdee9b58c5e7b2adb6e422749c43',
+      '0cf1520c6a38b8a7e13a1931541e0ab6e9e42b64b4ca014293b6b8373d493160',
   version: '3.6.3',
   buildConcurrency: 2,
 );

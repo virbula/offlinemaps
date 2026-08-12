@@ -5,7 +5,6 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 
 import 'generate_worldwide_regions.dart';
-import 'discover_routing_sources.dart';
 import 'build_routing.dart';
 import 'github_release_api.dart';
 import 'recover_latest.dart'
@@ -133,62 +132,32 @@ Future<void> prepareRelease(PrepareOptions options) async {
   if (tag != 'maps-$version') {
     throw const AutomationException('Release tag and map version differ.');
   }
-  final prepared = resume
-      ? <String, Object?>{
-          ...base,
-          if (base['routingDataset'] != null)
-            'routingDataset': <String, Object?>{
-              ...object(base['routingDataset'], 'routingDataset'),
-              // The retained first map release predates routing packs. Resume
-              // must never introduce new assets into that authoritative set.
-              'enabled': false,
-              'required': false,
-              'sources': <String, Object?>{},
-            },
-          'builder': <String, Object?>{
-            ...object(base['builder'], 'builder'),
-            'executable': options.pmtilesCommand,
-          },
-        }
-      : <String, Object?>{
-          ...base,
-          'generatedAt': generatedAt.toIso8601String(),
-          'releaseTag': tag,
-          'source': selected.toJson(),
-          'builder': <String, Object?>{
-            ...object(base['builder'], 'builder'),
-            'executable': options.pmtilesCommand,
-          },
-          'worldwideRegions': <String, Object?>{
-            ...object(base['worldwideRegions'], 'worldwideRegions'),
-            'version': version,
-            'sourceId': 'protomaps-${selected.key.substring(0, 8)}',
-          },
-        };
+  final configurations = prepareReleaseConfigurations(
+    base: base,
+    selected: selected,
+    version: version,
+    generatedAt: generatedAt,
+    mapReleaseTag: tag,
+    pmtilesCommand: options.pmtilesCommand,
+  );
+  final prepared = configurations.roadBuild;
   final discoveredConfig = File(
     path.join(options.outputDirectory.path, 'source.discovered.json'),
   );
   await writeJson(discoveredConfig, prepared);
   final config = File(path.join(options.outputDirectory.path, 'source.json'));
-  final routingDataset = prepared['routingDataset'] == null
-      ? null
-      : object(prepared['routingDataset'], 'routingDataset');
-  if (!resume && routingDataset?['enabled'] == true) {
-    await discoverRoutingSources(
-      manifestFile: discoveredConfig,
-      outputManifest: config,
-      cacheDirectory: Directory(
-        path.join(options.cacheDirectory.path, 'routing-sources'),
-      ),
-    );
-  } else {
-    await discoveredConfig.copy(config.path);
-  }
+  // source.json is the only config synchronized back to main after the road
+  // release is verified. Keep routing enabled there so the separately
+  // dispatched routing backfill can discover the matching graph sources.
+  await writeJson(config, configurations.synchronized);
   final manifest = File(
     path.join(options.outputDirectory.path, 'manifest.json'),
   );
   await generateWorldwideRegions(
-    manifestFile: config,
+    // The road release must remain independently publishable. It therefore
+    // builds from a routing-disabled manifest while source.json retains the
+    // authoritative next-stage routing identity.
+    manifestFile: discoveredConfig,
     outputManifest: manifest,
     cacheDirectory: options.cacheDirectory,
     builderExecutable: options.pmtilesCommand,
@@ -347,6 +316,73 @@ Future<void> prepareRelease(PrepareOptions options) async {
   stdout.writeln(
     'Prepared $tag with ${regions.length} regions in ${shards.length} shards.',
   );
+}
+
+typedef PreparedReleaseConfigurations = ({
+  Map<String, Object?> roadBuild,
+  Map<String, Object?> synchronized,
+});
+
+PreparedReleaseConfigurations prepareReleaseConfigurations({
+  required Map<String, Object?> base,
+  required RetainedSource selected,
+  required String version,
+  required DateTime generatedAt,
+  required String mapReleaseTag,
+  required String pmtilesCommand,
+}) {
+  if (mapReleaseTag != 'maps-$version') {
+    throw const AutomationException('Release tag and map version differ.');
+  }
+  final routing = base['routingDataset'] == null
+      ? null
+      : object(base['routingDataset'], 'routingDataset');
+  if (routing != null &&
+      (routing['enabled'] != true || routing['required'] != true)) {
+    throw const AutomationException(
+      'The authoritative routing dataset must remain enabled and required.',
+    );
+  }
+  final common = <String, Object?>{
+    ...base,
+    'generatedAt': generatedAt.toUtc().toIso8601String(),
+    'releaseTag': mapReleaseTag,
+    'source': selected.toJson(),
+    'builder': <String, Object?>{
+      ...object(base['builder'], 'builder'),
+      'executable': pmtilesCommand,
+    },
+    'worldwideRegions': <String, Object?>{
+      ...object(base['worldwideRegions'], 'worldwideRegions'),
+      'version': version,
+      'sourceId': 'protomaps-${selected.key.substring(0, 8)}',
+    },
+  };
+  final synchronized = <String, Object?>{
+    ...common,
+    if (routing != null)
+      'routingDataset': <String, Object?>{
+        ...routing,
+        'enabled': true,
+        'required': true,
+        'version': version,
+        'updatedAt': generatedAt.toUtc().toIso8601String(),
+        'releaseTag': 'routing-$version',
+        'graphs': <String, Object?>{},
+        'graphBounds': <String, Object?>{},
+        'regionGraphs': <String, Object?>{},
+      },
+  };
+  final roadBuild = <String, Object?>{
+    ...synchronized,
+    if (routing != null)
+      'routingDataset': <String, Object?>{
+        ...object(synchronized['routingDataset'], 'routingDataset'),
+        'enabled': false,
+        'required': false,
+      },
+  };
+  return (roadBuild: roadBuild, synchronized: synchronized);
 }
 
 Future<bool> _publicReleaseMatchesSource(

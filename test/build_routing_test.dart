@@ -82,6 +82,13 @@ void main() {
   test('catalog descriptor carries exact routing identity', () async {
     final configuration = ValhallaRoutingRegionConfiguration.fromJson(
       <String, Object?>{
+        'graphId': 'geofabrik-andorra',
+        'bounds': <String, Object?>{
+          'west': 1.4,
+          'south': 42.4,
+          'east': 1.8,
+          'north': 42.7,
+        },
         'file': 'ad-road-routing-2026.08.1.vtiles.tar',
         'releaseTag': 'routing-2026.08.1',
         'version': '2026.08.1',
@@ -106,6 +113,13 @@ void main() {
     expect(descriptor['format'], 'valhalla-tar');
     expect(descriptor['engine'], routingEngine);
     expect(descriptor['engineVersion'], supportedValhallaGraphVersion);
+    expect(descriptor['graphId'], 'geofabrik-andorra');
+    expect(descriptor['bounds'], <String, Object?>{
+      'west': 1.4,
+      'south': 42.4,
+      'east': 1.8,
+      'north': 42.7,
+    });
     expect(descriptor['exactBytes'], 42);
     expect(descriptor['version'], '2026.08.1');
     expect(descriptor['sourceSha256'], 'c' * 64);
@@ -118,6 +132,93 @@ void main() {
       'routing-2026.08.1/ad-road-routing-2026.08.1.vtiles.tar',
     );
   });
+
+  test(
+    'splits and reconstructs a routing archive with exact integrity',
+    () async {
+      final temporary = await Directory.systemTemp.createTemp('routing-parts-');
+      addTearDown(() => temporary.delete(recursive: true));
+      final source = File('${temporary.path}/graph.vtiles.tar');
+      final bytes = List<int>.generate(777, (index) => index % 251);
+      await source.writeAsBytes(bytes);
+      final parts = await splitRoutingArchiveForTransport(
+        archive: source,
+        outputDirectory: Directory('${temporary.path}/parts'),
+        partBytes: 256,
+        multipartThresholdBytes: 512,
+      );
+      expect(parts.map((part) => part.exactBytes), <int>[256, 256, 256, 9]);
+      expect(parts.map((part) => part.file), <String>[
+        'graph.vtiles.tar.part001',
+        'graph.vtiles.tar.part002',
+        'graph.vtiles.tar.part003',
+        'graph.vtiles.tar.part004',
+      ]);
+      final reconstructed = await reconstructRoutingArchive(
+        parts: parts,
+        partsDirectory: Directory('${temporary.path}/parts'),
+        output: File('${temporary.path}/reconstructed/graph.vtiles.tar'),
+        exactBytes: bytes.length,
+        sha256Digest: sha256.convert(bytes).toString(),
+        multipartThresholdBytes: 512,
+      );
+      expect(await reconstructed.readAsBytes(), bytes);
+    },
+  );
+
+  test(
+    'multipart catalog descriptor omits a monolithic download URL',
+    () async {
+      final configuration = ValhallaRoutingRegionConfiguration.fromJson(
+        <String, Object?>{
+          'graphId': 'geofabrik-test',
+          'bounds': <String, Object?>{
+            'west': -2.0,
+            'south': 50.0,
+            'east': 2.0,
+            'north': 54.0,
+          },
+          'file': 'graph-routing-2026.08.1.vtiles.tar',
+          'releaseTag': 'routing-2026.08.1',
+          'version': '2026.08.1',
+          'updatedAt': '2026-08-12T00:00:00Z',
+          'source': <String, Object?>{
+            'url': 'https://download.example.test/graph.osm.pbf',
+            'exactBytes': 12,
+            'sha256': 'a' * 64,
+          },
+        },
+        field: 'routing',
+      );
+      final descriptor = await routingCatalogDescriptor(
+        repository: 'virbula/offlinemaps',
+        configuration: configuration,
+        builder: builder,
+        exactBytes: 700,
+        sha256Digest: 'b' * 64,
+        sourceSha256: 'c' * 64,
+        multipartThresholdBytes: 512,
+        parts: <RoutingTransportPart>[
+          RoutingTransportPart(
+            file: '${configuration.file}.part001',
+            exactBytes: 400,
+            sha256: 'd' * 64,
+          ),
+          RoutingTransportPart(
+            file: '${configuration.file}.part002',
+            exactBytes: 300,
+            sha256: 'e' * 64,
+          ),
+        ],
+      );
+      expect(descriptor, isNot(contains('downloadUrl')));
+      expect((descriptor['parts']! as List), hasLength(2));
+      expect(
+        ((descriptor['parts']! as List).first as Map)['downloadUrl'],
+        endsWith('.vtiles.tar.part001'),
+      );
+    },
+  );
 
   test('accepts a pinned provider MD5 as the source identity', () {
     final source = ValhallaRoutingSource.fromJson(<String, Object?>{

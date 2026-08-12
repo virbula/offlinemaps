@@ -24,6 +24,63 @@ void main() {
     const checksum =
         '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     final manifest = await _writeSourceManifest(temporaryDirectory, checksum);
+    final sourceManifest =
+        jsonDecode(await manifest.readAsString()) as Map<String, Object?>;
+    sourceManifest['routingBuilder'] = <String, Object?>{
+      'dockerExecutable': 'docker',
+      'image':
+          'ghcr.io/valhalla/valhalla:3.6.3@sha256:'
+          '0cf1520c6a38b8a7e13a1931541e0ab6e9e42b64b4ca014293b6b8373d493160',
+      'version': '3.6.3',
+      'buildConcurrency': 2,
+    };
+    sourceManifest['routingDataset'] = <String, Object?>{
+      'enabled': true,
+      'required': true,
+      'provider': 'geofabrik',
+      'minimumRegionCount': 3,
+      'minimumCountryCount': 2,
+      'requiredContinents': <String>['NA', 'OC'],
+      'version': '2026.08.1',
+      'updatedAt': '2026-08-11T20:00:00Z',
+      'releaseTag': 'routing-2026.08.1',
+      'graphs': <String, Object?>{
+        'canada-british-columbia': <String, Object?>{
+          'url':
+              'https://download.geofabrik.de/north-america/canada/'
+              'british-columbia-260811.osm.pbf',
+          'exactBytes': 100,
+          'md5': 'a' * 32,
+        },
+        'fiji': <String, Object?>{
+          'url':
+              'https://download.geofabrik.de/australia-oceania/'
+              'fiji-260811.osm.pbf',
+          'exactBytes': 200,
+          'md5': 'b' * 32,
+        },
+      },
+      'graphBounds': <String, Object?>{
+        'canada-british-columbia': <String, Object?>{
+          'west': -120.0,
+          'south': 45.0,
+          'east': -110.0,
+          'north': 55.0,
+        },
+        'fiji': <String, Object?>{
+          'west': 177.0,
+          'south': -19.0,
+          'east': -178.0,
+          'north': -17.0,
+        },
+      },
+      'regionGraphs': <String, Object?>{
+        'ca-bc-road': 'canada-british-columbia',
+        'fj-east-road': 'fiji',
+        'fj-west-road': 'fiji',
+      },
+    };
+    await manifest.writeAsString(jsonEncode(sourceManifest));
     final admin0 = File('${temporaryDirectory.path}/admin0.geojson');
     final admin1 = File('${temporaryDirectory.path}/admin1.geojson');
     await admin0.writeAsString(
@@ -138,11 +195,28 @@ void main() {
     );
     expect((easternFiji['names']! as Map)['zh-Hans'], '斐济 (东部)');
     expect((easternFiji['names']! as Map)['fr'], 'Fidji (est)');
+    final easternRouting = easternFiji['routingBuild']! as Map;
+    expect(easternRouting['graphId'], 'fiji');
+    expect(easternRouting['bounds'], <String, Object?>{
+      'west': 177.0,
+      'south': -19.0,
+      'east': -178.0,
+      'north': -17.0,
+    });
+    expect(easternRouting['file'], 'fiji-routing-2026.08.1.vtiles.tar');
+    final westernFiji = regions.singleWhere(
+      (region) => region['id'] == 'fj-west-road',
+    );
+    expect(westernFiji['routingBuild'], easternRouting);
     final subdivision = regions.singleWhere(
       (region) => region['id'] == 'ca-bc-road',
     );
     expect(subdivision['continent'], 'NA');
     expect(subdivision['subdivisionCode'], 'CA-BC');
+    expect(
+      (subdivision['routingBuild']! as Map)['graphId'],
+      'canada-british-columbia',
+    );
   });
 
   test('uses enhanced ISO codes without sovereign code collisions', () async {

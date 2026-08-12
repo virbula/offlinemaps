@@ -11,6 +11,7 @@ import '../tool/offline_maps/prepare_release.dart';
 import '../tool/offline_maps/prepare_routing_backfill.dart';
 import '../tool/offline_maps/release_model.dart';
 import '../tool/offline_maps/sync_routing_backfill_metadata.dart';
+import '../tool/offline_maps/sync_metadata.dart';
 
 void main() {
   group('size-balanced matrix', () {
@@ -89,6 +90,90 @@ void main() {
       );
       expect(
         () => sourceDate('20261399.pmtiles'),
+        throwsA(isA<AutomationException>()),
+      );
+    });
+
+    test('monthly road handoff preserves the next routing identity', () {
+      final base = <String, Object?>{
+        'generatedAt': '2026-07-01T00:00:00.000Z',
+        'releaseTag': 'maps-2026.07.01',
+        'source': <String, Object?>{},
+        'builder': <String, Object?>{'executable': 'pmtiles'},
+        'worldwideRegions': <String, Object?>{
+          'version': '2026.07.01',
+          'sourceId': 'old',
+        },
+        'routingDataset': <String, Object?>{
+          'enabled': true,
+          'required': true,
+          'version': '2026.07.01',
+          'releaseTag': 'routing-2026.07.01',
+          'updatedAt': '2026-07-01T00:00:00.000Z',
+          'graphs': <String, Object?>{'old': <String, Object?>{}},
+          'graphBounds': <String, Object?>{'old': <String, Object?>{}},
+          'regionGraphs': <String, Object?>{'old-road': 'old'},
+        },
+      };
+      final selected = RetainedSource(
+        key: '20260811.pmtiles',
+        size: 137295889397,
+        version: '4.15.1',
+        blake3: 'b' * 64,
+        uploaded: DateTime.utc(2026, 8, 11, 10, 47),
+        metadataUrl: Uri.https(officialMetadataHost, '/builds.json'),
+      );
+      final generatedAt = DateTime.utc(2026, 8, 11);
+      final result = prepareReleaseConfigurations(
+        base: base,
+        selected: selected,
+        version: '2026.08.11',
+        generatedAt: generatedAt,
+        mapReleaseTag: 'maps-2026.08.11',
+        pmtilesCommand: 'pmtiles',
+      );
+
+      final roadRouting = result.roadBuild['routingDataset'] as Map;
+      expect(roadRouting['enabled'], isFalse);
+      expect(roadRouting['required'], isFalse);
+      expect(roadRouting['graphs'], isEmpty);
+
+      final synchronizedRouting = result.synchronized['routingDataset'] as Map;
+      expect(synchronizedRouting['enabled'], isTrue);
+      expect(synchronizedRouting['required'], isTrue);
+      expect(synchronizedRouting['version'], '2026.08.11');
+      expect(synchronizedRouting['releaseTag'], 'routing-2026.08.11');
+      expect(synchronizedRouting['updatedAt'], generatedAt.toIso8601String());
+      expect(synchronizedRouting['graphs'], isEmpty);
+      expect(synchronizedRouting['graphBounds'], isEmpty);
+      expect(synchronizedRouting['regionGraphs'], isEmpty);
+      expect(base['releaseTag'], 'maps-2026.07.01');
+      expect(
+        () => validateSynchronizedRoadConfig(
+          result.synchronized,
+          mapReleaseTag: 'maps-2026.08.11',
+        ),
+        returnsNormally,
+      );
+    });
+
+    test('monthly sync rejects routing-disabled source metadata', () {
+      expect(
+        () => validateSynchronizedRoadConfig(<String, Object?>{
+          'generatedAt': '2026-08-11T00:00:00.000Z',
+          'releaseTag': 'maps-2026.08.11',
+          'worldwideRegions': <String, Object?>{'version': '2026.08.11'},
+          'routingDataset': <String, Object?>{
+            'enabled': false,
+            'required': false,
+            'version': '2026.07.01',
+            'releaseTag': 'routing-2026.07.01',
+            'updatedAt': '2026-07-01T00:00:00.000Z',
+            'graphs': <String, Object?>{},
+            'graphBounds': <String, Object?>{},
+            'regionGraphs': <String, Object?>{},
+          },
+        }, mapReleaseTag: 'maps-2026.08.11'),
         throwsA(isA<AutomationException>()),
       );
     });
@@ -265,6 +350,11 @@ void main() {
       isTrue,
     );
     expect(workflow, contains('max-parallel: 4'));
+    expect(workflow, contains('queue: max'));
+    expect(
+      await File('tool/offline_maps/prepare_release.dart').readAsString(),
+      contains("'enabled': false"),
+    );
     expect(workflow, contains("cron: '17 3 8 * *'"));
     expect(workflow, contains('actions: read'));
     expect(workflow, contains(r'RUN_ATTEMPT: ${{ github.run_attempt }}'));
@@ -325,6 +415,8 @@ void main() {
       contains("if: needs.prepare.outputs.requires_build == 'true'"),
     );
     expect(workflow, isNot(contains("needs.prepare.outputs.no_op != 'true'")));
+    expect(workflow, contains("needs.prepare.outputs.pending == 'false'"));
+    expect(workflow, contains(r'docker image inspect "$image"'));
     expect(
       workflow.indexOf('uses: actions/upload-artifact@'),
       lessThan(workflow.indexOf('name: Expose bounded matrix')),
@@ -337,7 +429,20 @@ void main() {
       uses.every((revision) => RegExp(r'^[a-f0-9]{40}$').hasMatch(revision)),
       isTrue,
     );
-    expect(workflow, contains('max-parallel: 4'));
+    expect(workflow, isNot(contains('max-parallel: 4')));
+    expect(workflow, contains('runs-on: [self-hosted, macOS, ARM64]'));
+    expect(workflow, contains("needs.prepare.outputs.pending == 'true'"));
+    expect(workflow, contains('queue: max'));
+    expect(workflow, contains('--platform linux/amd64'));
+    expect(workflow, contains('for attempt in 1 2 3 4 5'));
+    expect(workflow, contains("'{{.Os}}/{{.Architecture}}'"));
+    expect(workflow, contains('build/plan/manifest.json'));
+    expect(workflow, contains('build/plan/base-catalog.json'));
+    expect(workflow, isNot(contains('path: build/plan/')));
+    expect(workflow, contains('retention-days: 7'));
+    expect(workflow, contains(r'(( 10#$INPUT_ITERATION <= 297 ))'));
+    expect(workflow, contains(r'test "$INPUT_ITERATION" = 0'));
+    expect(workflow, contains('--connect-timeout 15 --max-time 60'));
     expect(workflow, contains(r'CHECKOUT_SHA: ${{ github.sha }}'));
     expect(workflow, contains(r'--expected-head "$CHECKOUT_SHA"'));
     final directory = await Directory.systemTemp.createTemp('no-op-output-');
@@ -367,6 +472,22 @@ void main() {
       expect(buildValidation.exitCode, 0);
       expect((output.stdout as String).trim(), '$value');
     }
+  });
+
+  test('local plans do not require or pull the Valhalla image', () async {
+    final makefile = await File('Makefile').readAsString();
+    expect(makefile, contains('*" --dry-run "*)'));
+    expect(makefile, isNot(contains('*" --validate-only "*)')));
+    expect(makefile, contains('requires_routing_tools=false'));
+    expect(makefile, contains(r'docker image inspect "$$image"'));
+    expect(makefile, contains('for attempt in 1 2 3 4 5'));
+    expect(makefile, contains("'{{.Os}}/{{.Architecture}}'"));
+    expect(
+      makefile.indexOf(r'docker image inspect "$$image"'),
+      lessThan(
+        makefile.indexOf(r'docker pull --platform linux/amd64 "$$image"'),
+      ),
+    );
   });
 
   test('routing publication accepts only recoverable release states', () {
