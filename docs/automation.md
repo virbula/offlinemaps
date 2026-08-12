@@ -2,7 +2,7 @@
 
 ## Monthly road maps
 
-`.github/workflows/offline-maps.yml` runs at `03:17 UTC` on the eighth day of
+`.github/workflows/offline-maps.yml` runs at `03:17 UTC` on the tenth day of
 each month and can also be dispatched manually. It publishes the worldwide
 road maps independently of routing:
 
