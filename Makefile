@@ -12,10 +12,13 @@ OFFLINE_MAP_CACHE_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/cache
 OFFLINE_MAP_GENERATED_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/generated
 OFFLINE_MAP_GENERATED_CONFIG ?= $(OFFLINE_MAP_GENERATED_DIR)/worldwide-manifest.json
 OFFLINE_MAP_STAGING_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/staging
-OFFLINE_MAP_OUTPUT_DIR ?= .
+OFFLINE_MAP_OUTPUT_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/output
+OFFLINE_MAP_TRACKED_METADATA_DIR ?= .
 OFFLINE_MAP_BUILD_FLAGS ?=
 OFFLINE_MAP_PUBLISH_FLAGS ?=
 OFFLINE_MAP_PUBLISH_CONFIRM ?=
+
+OFFLINE_MAP_METADATA_FILES := catalog.json offline-regions.generated.json provenance.json SHA256SUMS
 
 .DEFAULT_GOAL := check
 
@@ -80,6 +83,23 @@ build_offline_maps: prepare_offline_map_tools
 		--staging-dir "$(OFFLINE_MAP_STAGING_DIR)" \
 		--output-dir "$(OFFLINE_MAP_OUTPUT_DIR)" \
 		--cache-dir "$(OFFLINE_MAP_CACHE_DIR)" $(OFFLINE_MAP_BUILD_FLAGS)
+	@if [ -z "$(strip $(OFFLINE_MAP_BUILD_FLAGS))" ]; then \
+		$(MAKE) sync_offline_map_metadata; \
+	fi
+
+.PHONY: sync_offline_map_metadata
+sync_offline_map_metadata:
+	@set -eu; \
+		if [ "$(abspath $(OFFLINE_MAP_OUTPUT_DIR))" = "$(abspath $(OFFLINE_MAP_TRACKED_METADATA_DIR))" ]; then exit 0; fi; \
+		mkdir -p "$(OFFLINE_MAP_TRACKED_METADATA_DIR)"; \
+		for name in $(OFFLINE_MAP_METADATA_FILES); do \
+			source="$(OFFLINE_MAP_OUTPUT_DIR)/$$name"; \
+			destination="$(OFFLINE_MAP_TRACKED_METADATA_DIR)/$$name"; \
+			test -f "$$source" || { echo "ERROR: Missing generated metadata $$source."; exit 1; }; \
+			temporary="$$destination.tmp"; \
+			cp "$$source" "$$temporary"; \
+			mv "$$temporary" "$$destination"; \
+		done
 
 .PHONY: plan_offline_maps
 plan_offline_maps:

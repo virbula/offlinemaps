@@ -12,7 +12,7 @@ Build every configured EasyElevation PMTiles region sequentially.
 Usage:
   dart run tool/offline_maps/build_all.dart \\
     --manifest config/offline-map-build.json \\
-    [--output-dir .] \\
+    [--output-dir build/local/output] \\
     [--staging-dir build/local/staging] \\
     [--cache-dir build/local/cache] \\
     [--validate-only | --dry-run]
@@ -68,7 +68,7 @@ class OfflineMapBuildCliOptions {
 
   factory OfflineMapBuildCliOptions.parse(List<String> arguments) {
     String? manifest;
-    var output = '.';
+    var output = 'build/local/output';
     var staging = 'build/local/staging';
     var cache = 'build/local/cache';
     var validateOnly = false;

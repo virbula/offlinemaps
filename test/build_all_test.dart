@@ -8,13 +8,16 @@ import '../tool/offline_maps/build_all.dart';
 import '../tool/offline_maps/build_region.dart';
 
 void main() {
-  test('CLI defaults keep scratch state separate from repository output', () {
+  test('CLI defaults keep all generated state below the build directory', () {
     final options = OfflineMapBuildCliOptions.parse(const <String>[
       '--manifest',
       'config/offline-map-build.json',
     ]);
 
-    expect(options.outputDirectory.path, path.normalize(path.absolute('.')));
+    expect(
+      options.outputDirectory.path,
+      path.normalize(path.absolute('build/local/output')),
+    );
     expect(
       options.stagingDirectory.path,
       path.normalize(path.absolute('build/local/staging')),

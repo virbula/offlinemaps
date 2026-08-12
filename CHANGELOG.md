@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1+1 — 2026-08-11
+
+- Moved the complete local PMTiles release bundle out of the repository root
+  and into the ignored `build/local/output` directory by default.
+- Kept the four reviewable release metadata files at the repository root by
+  atomically synchronizing them after each successful real local build.
+- Updated the standalone Dart builder default, Makefile workflow, tests, and
+  local-processing documentation so future builds cannot repopulate the
+  repository root with hundreds of generated map archives.
+
 ## 1.1.0+1 — 2026-08-11
 
 - Added unattended worldwide offline-map releases through a monthly GitHub

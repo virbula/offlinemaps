@@ -63,8 +63,9 @@ the `offlinemaps` repository root:
 make build_offline_maps
 ```
 
-Builder-owned scratch state is ignored under `build/`, while completed maps
-and reviewable metadata are written to the repository root by default:
+Builder-owned scratch state and the complete local release bundle are ignored
+under `build/`. After a successful real build, the four small reviewable
+metadata files are also copied atomically to the repository root:
 
 ```text
 offlinemaps/
@@ -74,7 +75,12 @@ offlinemaps/
     generated/worldwide-manifest.json
     generated/worldwide-regions/
     staging/<in-progress PMTiles>
-  <completed PMTiles; ignored by Git>
+    output/
+      <completed PMTiles; ignored by Git>
+      catalog.json
+      offline-regions.generated.json
+      provenance.json
+      SHA256SUMS
   catalog.json
   offline-regions.generated.json
   provenance.json
@@ -82,7 +88,10 @@ offlinemaps/
 ```
 
 `OFFLINE_MAP_BUILD_DIR` relocates scratch state together, while
-`OFFLINE_MAP_OUTPUT_DIR` selects the final release-bundle directory. Individual
+`OFFLINE_MAP_OUTPUT_DIR` selects the final release-bundle directory and defaults
+to `build/local/output`. `OFFLINE_MAP_TRACKED_METADATA_DIR` selects where a real
+build copies the four reviewable metadata files and defaults to the repository
+root. Dry runs and validation-only runs do not sync tracked metadata. Individual
 directory variables remain available for specialized build hosts. The
 EasyElevation app's `flutter clean` cannot remove any of this repository's map
 state. If scratch and output are on different filesystems, the builder copies
@@ -196,8 +205,9 @@ The generated catalog is strictly schema version 2:
 - geographic hierarchy fields are copied from the reviewed build manifest.
 
 This repository intentionally separates large release assets from reviewable
-release metadata. Keep completed `.pmtiles` archives ignored and upload them
-only as GitHub Release assets. Track the four generated root metadata files—`catalog.json`,
+release metadata. Keep completed `.pmtiles` archives in the ignored
+`build/local/output` release bundle and upload them only as GitHub Release
+assets. Track the four synchronized root metadata files—`catalog.json`,
 `offline-regions.generated.json`, `provenance.json`, and `SHA256SUMS`—so every
 published catalog and its provenance/checksum record can be reviewed in Git.
 
@@ -278,8 +288,8 @@ reuse its tag or filenames with different bytes.
    `worldwideRegions.version`. Increment `releaseTag` to the matching
    `maps-<version>` value.
 3. Commit or tag the prior release metadata, then clear or archive every prior
-   root PMTiles archive from the output directory. Build with a clean staging
-   directory and clean output root; do not mix files from different tags.
+   PMTiles archive from `build/local/output`. Build with a clean staging
+   directory and clean output directory; do not mix files from different tags.
 4. Review the generated region counts, hierarchy, timestamp, provenance,
    checksums, and dry-run publication plan.
 5. Publish the new tag. The publisher uploads immutable tagged PMTiles URLs,
