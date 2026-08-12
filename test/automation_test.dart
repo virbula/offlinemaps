@@ -8,7 +8,9 @@ import '../tool/offline_maps/build_shard.dart';
 import '../tool/offline_maps/finalize_release.dart';
 import '../tool/offline_maps/github_release_api.dart';
 import '../tool/offline_maps/prepare_release.dart';
+import '../tool/offline_maps/prepare_routing_backfill.dart';
 import '../tool/offline_maps/release_model.dart';
+import '../tool/offline_maps/sync_routing_backfill_metadata.dart';
 
 void main() {
   group('size-balanced matrix', () {
@@ -302,6 +304,150 @@ void main() {
         'c6f8917eb8fb27a59ba1881a5439e5599da641110a2c652bf8f192f0baa732a7',
       ),
     );
+  });
+
+  test('routing workflow preserves false and true no-op outputs', () async {
+    final workflow = await File(
+      '.github/workflows/routing-backfill.yml',
+    ).readAsString();
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.noOp | type == "boolean"' build/plan/release.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(r'''no_op="$(jq -r '.noOp' build/plan/release.json)"'''),
+    );
+    expect(
+      workflow,
+      contains("if: needs.prepare.outputs.requires_build == 'true'"),
+    );
+    expect(workflow, isNot(contains("needs.prepare.outputs.no_op != 'true'")));
+    expect(
+      workflow.indexOf('uses: actions/upload-artifact@'),
+      lessThan(workflow.indexOf('name: Expose bounded matrix')),
+    );
+    final uses = RegExp(
+      r'uses:\s+[^@\s]+@([^\s#]+)',
+    ).allMatches(workflow).map((match) => match.group(1)!).toList();
+    expect(uses, isNotEmpty);
+    expect(
+      uses.every((revision) => RegExp(r'^[a-f0-9]{40}$').hasMatch(revision)),
+      isTrue,
+    );
+    expect(workflow, contains('max-parallel: 4'));
+    expect(workflow, contains(r'CHECKOUT_SHA: ${{ github.sha }}'));
+    expect(workflow, contains(r'--expected-head "$CHECKOUT_SHA"'));
+    final directory = await Directory.systemTemp.createTemp('no-op-output-');
+    addTearDown(() => directory.delete(recursive: true));
+    for (final value in const <bool>[false, true]) {
+      final file = File('${directory.path}/release.json');
+      await file.writeAsString(
+        jsonEncode(<String, Object?>{'noOp': value, 'requiresBuild': !value}),
+      );
+      final validation = await Process.run('jq', <String>[
+        '-e',
+        '.noOp | type == "boolean"',
+        file.path,
+      ]);
+      final output = await Process.run('jq', <String>[
+        '-r',
+        '.noOp',
+        file.path,
+      ]);
+      final buildValidation = await Process.run('jq', <String>[
+        '-e',
+        '.requiresBuild | type == "boolean"',
+        file.path,
+      ]);
+      expect(validation.exitCode, 0);
+      expect(output.exitCode, 0);
+      expect(buildValidation.exitCode, 0);
+      expect((output.stdout as String).trim(), '$value');
+    }
+  });
+
+  test('routing publication accepts only recoverable release states', () {
+    GitHubRelease release({
+      required int id,
+      required String tag,
+      required bool draft,
+      String target = 'a123456789012345678901234567890123456789',
+    }) => GitHubRelease(
+      id: id,
+      tagName: tag,
+      targetCommitish: target,
+      draft: draft,
+      prerelease: false,
+    );
+    void validate(
+      bool routingDraft,
+      bool catalogDraft, {
+      String? catalogTarget,
+    }) {
+      validateRecoverableRoutingReleasePair(
+        routingRelease: release(
+          id: 1,
+          tag: 'routing-2026.08.1',
+          draft: routingDraft,
+        ),
+        catalogRelease: release(
+          id: 2,
+          tag: 'catalog-2026.08.1',
+          draft: catalogDraft,
+          target: catalogTarget ?? 'a123456789012345678901234567890123456789',
+        ),
+        routingTag: 'routing-2026.08.1',
+        catalogTag: 'catalog-2026.08.1',
+      );
+    }
+
+    expect(() => validate(true, true), returnsNormally);
+    expect(() => validate(false, true), returnsNormally);
+    expect(() => validate(false, false), returnsNormally);
+    expect(() => validate(true, false), throwsA(isA<AutomationException>()));
+    expect(
+      () => validate(false, true, catalogTarget: 'b' * 40),
+      throwsA(isA<AutomationException>()),
+    );
+    expect(
+      () => validateRecoverableRoutingReleasePair(
+        routingRelease: release(id: 1, tag: 'routing-2026.08.1', draft: true),
+        catalogRelease: release(
+          id: 2,
+          tag: 'catalog-2026.08.1',
+          draft: true,
+          target: 'b' * 40,
+        ),
+        routingTag: 'routing-2026.08.1',
+        catalogTag: 'catalog-2026.08.1',
+        allowDraftTargetMismatch: true,
+      ),
+      returnsNormally,
+    );
+  });
+
+  test('routing sync recognizes only its exact prior atomic commit', () {
+    bool validate({
+      List<String> parents = const <String>['a'],
+      Object? message = 'sync',
+      String tree = 'tree',
+    }) => isExactPriorRoutingSync(
+      parentShas: parents,
+      message: message,
+      treeSha: tree,
+      expectedHead: 'a',
+      expectedMessage: 'sync',
+      expectedTreeSha: 'tree',
+    );
+
+    expect(validate(), isTrue);
+    expect(validate(parents: const <String>['b']), isFalse);
+    expect(validate(parents: const <String>['a', 'b']), isFalse);
+    expect(validate(message: 'different'), isFalse);
+    expect(validate(tree: 'different'), isFalse);
   });
 
   test('first release authoritative metadata and manifest agree', () async {

@@ -184,6 +184,51 @@ class GitHubReleaseClient {
     return GitHubRelease.fromJson(jsonDecode(response.body));
   }
 
+  /// Retargets an exact, empty draft after a workflow-only failure.
+  ///
+  /// A draft that already contains an asset is never mutated because its
+  /// contents may have been produced for the original reviewed target.
+  Future<GitHubRelease> retargetEmptyDraft({
+    required GitHubRelease release,
+    required String tag,
+    required String target,
+  }) async {
+    if (release.tagName != tag || !release.draft || release.prerelease) {
+      throw AutomationException(
+        'Only the exact non-prerelease draft $tag may be retargeted.',
+      );
+    }
+    if (!RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
+      throw const AutomationException(
+        'Draft recovery target must be a full lowercase commit SHA.',
+      );
+    }
+    if (release.targetCommitish.toLowerCase() == target) return release;
+    if ((await listAssets(release.id)).isNotEmpty) {
+      throw AutomationException(
+        'Draft $tag has assets and cannot be safely retargeted.',
+      );
+    }
+    final updated = await _patchRelease(release.id, <String, Object?>{
+      'target_commitish': target,
+    });
+    if (updated.id != release.id ||
+        updated.tagName != tag ||
+        updated.targetCommitish.toLowerCase() != target ||
+        !updated.draft ||
+        updated.prerelease) {
+      throw AutomationException(
+        'GitHub returned an unexpected release after retargeting $tag.',
+      );
+    }
+    if ((await listAssets(release.id)).isNotEmpty) {
+      throw AutomationException(
+        'Draft $tag gained assets during retargeting; recovery stopped.',
+      );
+    }
+    return updated;
+  }
+
   Future<List<GitHubReleaseAsset>> listAssets(int releaseId) async {
     final result = <GitHubReleaseAsset>[];
     for (var page = 1; ; page++) {
@@ -211,6 +256,74 @@ class GitHubReleaseClient {
       }
     }
     return List.unmodifiable(result);
+  }
+
+  Future<void> downloadAsset({
+    required GitHubReleaseAsset asset,
+    required File destination,
+    int maximumBytes = 64 * 1024 * 1024,
+  }) async {
+    if (asset.state != 'uploaded' ||
+        asset.size <= 0 ||
+        asset.size > maximumBytes ||
+        asset.digest == null ||
+        !asset.digest!.startsWith('sha256:')) {
+      throw AutomationException(
+        'GitHub asset ${asset.name} cannot be downloaded safely.',
+      );
+    }
+    await destination.parent.create(recursive: true);
+    if (await destination.exists()) await destination.delete();
+    IOSink? sink;
+    var verified = false;
+    try {
+      final request = await _open(
+        'GET',
+        Uri.https(
+          'api.github.com',
+          '/repos/$repository/releases/assets/${asset.id}',
+        ),
+        accept: 'application/octet-stream',
+      );
+      request.followRedirects = true;
+      request.maxRedirects = 3;
+      final response = await request.close();
+      if (response.statusCode != HttpStatus.ok) {
+        final body = await utf8.decoder.bind(response).join();
+        throw AutomationException(
+          'GitHub asset download returned HTTP ${response.statusCode}: '
+          '${_tail(body)}',
+        );
+      }
+      sink = destination.openWrite();
+      var received = 0;
+      await for (final chunk in response) {
+        received += chunk.length;
+        if (received > asset.size || received > maximumBytes) {
+          throw AutomationException(
+            'GitHub asset ${asset.name} exceeded its declared size.',
+          );
+        }
+        sink.add(chunk);
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      final expectedDigest = asset.digest!.substring(7).toLowerCase();
+      if (received != asset.size ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(expectedDigest) ||
+          await fileSha256(destination) != expectedDigest) {
+        throw AutomationException(
+          'GitHub asset ${asset.name} failed byte and digest verification.',
+        );
+      }
+      verified = true;
+    } finally {
+      await sink?.close();
+      if (!verified && await destination.exists()) {
+        await destination.delete();
+      }
+    }
   }
 
   Future<void> uploadAsset({
@@ -432,11 +545,15 @@ class GitHubReleaseClient {
     );
   }
 
-  Future<HttpClientRequest> _open(String method, Uri uri) async {
+  Future<HttpClientRequest> _open(
+    String method,
+    Uri uri, {
+    String accept = 'application/vnd.github+json',
+  }) async {
     final request = await _client.openUrl(method, uri);
     request.headers
       ..set(HttpHeaders.authorizationHeader, 'Bearer $token')
-      ..set(HttpHeaders.acceptHeader, 'application/vnd.github+json')
+      ..set(HttpHeaders.acceptHeader, accept)
       ..set('X-GitHub-Api-Version', apiVersion)
       ..set(HttpHeaders.userAgentHeader, 'virbula-offlinemaps-actions');
     return request;

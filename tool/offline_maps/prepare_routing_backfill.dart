@@ -112,37 +112,125 @@ Future<void> prepareRoutingBackfill(
   if (!await options.baseCatalog.exists()) {
     throw const AutomationException('Authoritative base catalog is missing.');
   }
-  await options.outputDirectory.create(recursive: true);
-  await options.cacheDirectory.create(recursive: true);
-  final discovered = File(
-    path.join(options.outputDirectory.path, 'source.json'),
-  );
-  if (options.reuseDiscovered) {
-    await _validateReusableDiscovery(baseConfig, discovered);
-  } else {
-    await discoverRoutingSources(
-      manifestFile: options.config,
-      outputManifest: discovered,
-      cacheDirectory: Directory(
-        path.join(options.cacheDirectory.path, 'routing-sources'),
-      ),
+  final mapTag = string(baseConfig['releaseTag'], 'releaseTag');
+  final version = mapVersionForBackfillTag(mapTag);
+  final routingTag = 'routing-$version';
+  final catalogTag = catalogTagForVersion(version);
+  final dataset = object(baseConfig['routingDataset'], 'routingDataset');
+  if (dataset['releaseTag'] != routingTag ||
+      dataset['version'] != version ||
+      baseConfig['generatedAt'] != dataset['updatedAt']) {
+    throw const AutomationException(
+      'Configured routing dataset identity does not match the map release.',
     );
   }
+  await options.outputDirectory.create(recursive: true);
+  await options.cacheDirectory.create(recursive: true);
   final manifestFile = File(
     path.join(options.outputDirectory.path, 'manifest.json'),
   );
-  await generateWorldwideRegions(
-    manifestFile: discovered,
-    outputManifest: manifestFile,
-    cacheDirectory: options.cacheDirectory,
+  GitHubReleaseClient? github;
+  GitHubRelease? mapRelease;
+  GitHubRelease? routingRelease;
+  GitHubRelease? catalogRelease;
+  var resumedPlan = false;
+  if (!options.dryRun) {
+    final token = Platform.environment['GITHUB_TOKEN'];
+    if (token == null || token.isEmpty) {
+      throw const AutomationException('GITHUB_TOKEN is required.');
+    }
+    github = GitHubReleaseClient(repository: options.repository, token: token);
+    mapRelease = await github.releaseByTag(mapTag);
+    routingRelease = await github.releaseByTag(routingTag);
+    catalogRelease = await github.releaseByTag(catalogTag);
+    if (mapRelease == null || mapRelease.draft || mapRelease.prerelease) {
+      github.close();
+      throw AutomationException('$mapTag is not a public map release.');
+    }
+    if (routingRelease != null && catalogRelease == null) {
+      final target = routingRelease.targetCommitish.toLowerCase();
+      if (routingRelease.tagName != routingTag ||
+          routingRelease.prerelease ||
+          !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
+        github.close();
+        throw const AutomationException(
+          'The unpaired routing release is not safely recoverable.',
+        );
+      }
+      catalogRelease = await github.createDraft(
+        tag: catalogTag,
+        target: target,
+        title: 'EasyElevation offline catalog $catalogTag',
+        body:
+            'Joined EasyElevation offline catalog referencing immutable '
+            '$mapTag road maps and $routingTag Valhalla '
+            '$supportedValhallaGraphVersion routing graphs.',
+      );
+    } else if (routingRelease == null && catalogRelease != null) {
+      github.close();
+      throw const AutomationException(
+        'A catalog release without its routing release is not recoverable.',
+      );
+    }
+    if (routingRelease != null) {
+      validateRecoverableRoutingReleasePair(
+        routingRelease: routingRelease,
+        catalogRelease: catalogRelease!,
+        routingTag: routingTag,
+        catalogTag: catalogTag,
+        allowDraftTargetMismatch: true,
+      );
+      final assets = await github.listAssets(routingRelease.id);
+      if (assets.isNotEmpty) {
+        final plans = assets
+            .where((asset) => asset.name == routingPlanAssetName)
+            .toList(growable: false);
+        if (plans.length != 1) {
+          github.close();
+          throw const AutomationException(
+            'Existing routing assets are not bound to one immutable plan.',
+          );
+        }
+        await github.downloadAsset(
+          asset: plans.single,
+          destination: manifestFile,
+        );
+        resumedPlan = true;
+      }
+    }
+  }
+  final discovered = File(
+    path.join(options.outputDirectory.path, 'source.json'),
   );
+  if (!resumedPlan) {
+    if (options.reuseDiscovered) {
+      await _validateReusableDiscovery(baseConfig, discovered);
+    } else {
+      await discoverRoutingSources(
+        manifestFile: options.config,
+        outputManifest: discovered,
+        cacheDirectory: Directory(
+          path.join(options.cacheDirectory.path, 'routing-sources'),
+        ),
+      );
+    }
+    await generateWorldwideRegions(
+      manifestFile: discovered,
+      outputManifest: manifestFile,
+      cacheDirectory: options.cacheDirectory,
+    );
+  }
   final manifest = await readJsonObject(manifestFile);
+  final planExactBytes = await manifestFile.length();
+  final planSha256 = await fileSha256(manifestFile);
   final routingRegions = routingRegionsFromManifest(manifest);
-  // The generated build manifest intentionally flattens routing configuration
-  // into each region's routingBuild descriptor so build_all can reject unknown
-  // top-level fields. Keep the discovery contract from the pinned source file.
-  final discoveredSource = await readJsonObject(discovered);
-  final dataset = object(discoveredSource['routingDataset'], 'routingDataset');
+  _validateResumableManifest(
+    baseConfig: baseConfig,
+    manifest: manifest,
+    routingRegions: routingRegions,
+    routingTag: routingTag,
+    version: version,
+  );
   final configuredMinimum = integer(
     dataset['minimumRegionCount'],
     'routingDataset.minimumRegionCount',
@@ -150,17 +238,6 @@ Future<void> prepareRoutingBackfill(
   if (routingRegions.length < configuredMinimum) {
     throw const AutomationException(
       'Routing discovery fell below the configured worldwide minimum.',
-    );
-  }
-  final mapTag = string(manifest['releaseTag'], 'releaseTag');
-  final version = mapVersionForBackfillTag(mapTag);
-  final routingTag = 'routing-$version';
-  final catalogTag = catalogTagForVersion(version);
-  if (dataset['releaseTag'] != routingTag ||
-      dataset['version'] != version ||
-      manifest['generatedAt'] != dataset['updatedAt']) {
-    throw const AutomationException(
-      'Routing dataset identity does not match the map release.',
     );
   }
   final copiedCatalog = File(
@@ -192,59 +269,25 @@ Future<void> prepareRoutingBackfill(
   var routingReleaseId = 0;
   var catalogReleaseId = 0;
   var noOp = false;
+  var requiresBuild = false;
+  var coordinatedTarget = options.target;
   if (!options.dryRun) {
-    final token = Platform.environment['GITHUB_TOKEN'];
-    if (token == null || token.isEmpty) {
-      throw const AutomationException('GITHUB_TOKEN is required.');
-    }
-    final github = GitHubReleaseClient(
-      repository: options.repository,
-      token: token,
-    );
+    final client = github!;
     try {
-      final mapRelease = await github.releaseByTag(mapTag);
-      if (mapRelease == null || mapRelease.draft || mapRelease.prerelease) {
-        throw AutomationException('$mapTag is not a public map release.');
-      }
       await _validatePublishedMapAssets(
-        github,
-        releaseId: mapRelease.id,
+        client,
+        releaseId: mapRelease!.id,
         records: baseRecords,
       );
       mapReleaseId = mapRelease.id;
-      var routingRelease = await github.releaseByTag(routingTag);
-      var catalogRelease = await github.releaseByTag(catalogTag);
-      if (routingRelease != null &&
-          catalogRelease != null &&
-          !routingRelease.draft &&
-          !catalogRelease.draft) {
-        final latest = await github.latestRelease();
-        if (routingRelease.prerelease ||
-            catalogRelease.prerelease ||
-            routingRelease.targetCommitish.toLowerCase() !=
-                options.target.toLowerCase() ||
-            catalogRelease.targetCommitish.toLowerCase() !=
-                options.target.toLowerCase() ||
-            latest?.id != catalogRelease.id) {
-          throw const AutomationException(
-            'Existing public backfill releases do not match this target.',
-          );
-        }
-        noOp = true;
-      } else {
-        if (routingRelease != null && !routingRelease.draft ||
-            catalogRelease != null && !catalogRelease.draft) {
-          throw const AutomationException(
-            'A partially published backfill requires manual recovery.',
-          );
-        }
-        routingRelease ??= await github.createDraft(
+      if (routingRelease == null) {
+        routingRelease = await client.createDraft(
           tag: routingTag,
           target: options.target,
           title: 'EasyElevation offline routing $routingTag',
           body: routingReleaseBody,
         );
-        catalogRelease ??= await github.createDraft(
+        catalogRelease = await client.createDraft(
           tag: catalogTag,
           target: options.target,
           title: 'EasyElevation offline catalog $catalogTag',
@@ -253,13 +296,64 @@ Future<void> prepareRoutingBackfill(
               '$mapTag road maps and $routingTag Valhalla '
               '$supportedValhallaGraphVersion routing graphs.',
         );
-        _validateDraft(routingRelease, tag: routingTag, target: options.target);
-        _validateDraft(catalogRelease, tag: catalogTag, target: options.target);
       }
-      routingReleaseId = routingRelease.id;
-      catalogReleaseId = catalogRelease.id;
+      var routes = routingRelease;
+      var joinedCatalog = catalogRelease!;
+      validateRecoverableRoutingReleasePair(
+        routingRelease: routes,
+        catalogRelease: joinedCatalog,
+        routingTag: routingTag,
+        catalogTag: catalogTag,
+      );
+      if (!resumedPlan &&
+          routes.draft &&
+          joinedCatalog.draft &&
+          (routes.targetCommitish.toLowerCase() != options.target ||
+              joinedCatalog.targetCommitish.toLowerCase() != options.target)) {
+        await _requireCoordinatedDraftsAreEmpty(
+          client,
+          routingRelease: routes,
+          catalogRelease: joinedCatalog,
+          routingTag: routingTag,
+          catalogTag: catalogTag,
+        );
+        routes = await client.retargetEmptyDraft(
+          release: routes,
+          tag: routingTag,
+          target: options.target,
+        );
+        joinedCatalog = await client.retargetEmptyDraft(
+          release: joinedCatalog,
+          tag: catalogTag,
+          target: options.target,
+        );
+      }
+      validateRecoverableRoutingReleasePair(
+        routingRelease: routes,
+        catalogRelease: joinedCatalog,
+        routingTag: routingTag,
+        catalogTag: catalogTag,
+      );
+      coordinatedTarget = routes.targetCommitish.toLowerCase();
+      requiresBuild = routes.draft;
+      await _ensureRoutingPlanAsset(
+        client,
+        releaseId: routes.id,
+        manifestFile: manifestFile,
+        exactBytes: planExactBytes,
+        sha256: planSha256,
+        routingRegions: routingRegions,
+        allowCreate: routes.draft,
+      );
+      await _validateCatalogReleaseAssets(client, releaseId: joinedCatalog.id);
+      if (!routes.draft && !joinedCatalog.draft) {
+        final latest = await client.latestRelease();
+        noOp = latest?.id == joinedCatalog.id;
+      }
+      routingReleaseId = routes.id;
+      catalogReleaseId = joinedCatalog.id;
     } finally {
-      github.close();
+      client.close();
     }
   }
   await writeJson(
@@ -268,7 +362,7 @@ Future<void> prepareRoutingBackfill(
       'schemaVersion': routingBackfillSchemaVersion,
       'mode': 'routing-backfill',
       'repository': options.repository,
-      'targetCommitish': options.target,
+      'targetCommitish': coordinatedTarget,
       'releaseTag': catalogTag,
       'catalogReleaseTag': catalogTag,
       'catalogReleaseId': catalogReleaseId,
@@ -276,6 +370,9 @@ Future<void> prepareRoutingBackfill(
       'mapReleaseId': mapReleaseId,
       'routingReleaseTag': routingTag,
       'routingReleaseId': routingReleaseId,
+      'routingPlanAsset': routingPlanAssetName,
+      'routingPlanExactBytes': planExactBytes,
+      'routingPlanSha256': planSha256,
       'routingRegionCount': routingRegions.length,
       'mapOnlyRegionCount':
           expectedBackfillMapRegionCount - routingRegions.length,
@@ -283,6 +380,7 @@ Future<void> prepareRoutingBackfill(
       'shardCount': shards.length,
       'generatedAt': catalog['generatedAt'],
       'noOp': noOp,
+      'requiresBuild': requiresBuild,
     },
   );
   stdout.writeln(
@@ -290,6 +388,215 @@ Future<void> prepareRoutingBackfill(
     '${expectedBackfillMapRegionCount - routingRegions.length} map-only, '
     '${shards.length} shards.',
   );
+}
+
+Future<void> _requireCoordinatedDraftsAreEmpty(
+  GitHubReleaseClient github, {
+  required GitHubRelease routingRelease,
+  required GitHubRelease catalogRelease,
+  required String routingTag,
+  required String catalogTag,
+}) async {
+  for (final entry in <(GitHubRelease, String)>[
+    (routingRelease, routingTag),
+    (catalogRelease, catalogTag),
+  ]) {
+    final release = entry.$1;
+    if (release.tagName != entry.$2 || !release.draft || release.prerelease) {
+      throw const AutomationException(
+        'Only the exact coordinated drafts may be recovered.',
+      );
+    }
+  }
+  final assets = await Future.wait(<Future<List<GitHubReleaseAsset>>>[
+    github.listAssets(routingRelease.id),
+    github.listAssets(catalogRelease.id),
+  ]);
+  if (assets.any((values) => values.isNotEmpty)) {
+    throw const AutomationException(
+      'A coordinated draft has assets and cannot be retargeted.',
+    );
+  }
+}
+
+void validateRecoverableRoutingReleasePair({
+  required GitHubRelease routingRelease,
+  required GitHubRelease catalogRelease,
+  required String routingTag,
+  required String catalogTag,
+  bool allowDraftTargetMismatch = false,
+}) {
+  final routingTarget = routingRelease.targetCommitish.toLowerCase();
+  final catalogTarget = catalogRelease.targetCommitish.toLowerCase();
+  if (routingRelease.tagName != routingTag ||
+      catalogRelease.tagName != catalogTag ||
+      routingRelease.prerelease ||
+      catalogRelease.prerelease ||
+      !RegExp(r'^[a-f0-9]{40}$').hasMatch(routingTarget) ||
+      !RegExp(r'^[a-f0-9]{40}$').hasMatch(catalogTarget) ||
+      (routingTarget != catalogTarget &&
+          !(allowDraftTargetMismatch &&
+              routingRelease.draft &&
+              catalogRelease.draft)) ||
+      (routingRelease.draft && !catalogRelease.draft)) {
+    throw const AutomationException(
+      'Routing and catalog releases are not in a recoverable coordinated state.',
+    );
+  }
+}
+
+void _validateResumableManifest({
+  required Map<String, Object?> baseConfig,
+  required Map<String, Object?> manifest,
+  required List<Map<String, Object?>> routingRegions,
+  required String routingTag,
+  required String version,
+}) {
+  for (final key in const <String>[
+    'schemaVersion',
+    'generatedAt',
+    'githubRepository',
+    'releaseTag',
+    'source',
+    'builder',
+    'routingBuilder',
+  ]) {
+    if (!deepJsonEquals(baseConfig[key], manifest[key])) {
+      throw AutomationException(
+        'Immutable routing plan differs from configuration at $key.',
+      );
+    }
+  }
+  final dataset = object(baseConfig['routingDataset'], 'routingDataset');
+  final requiredContinentsValue = dataset['requiredContinents'];
+  if (requiredContinentsValue is! List ||
+      requiredContinentsValue.any((value) => value is! String)) {
+    throw const AutomationException(
+      'routingDataset.requiredContinents must be a string array.',
+    );
+  }
+  final minimumCountries = integer(
+    dataset['minimumCountryCount'],
+    'routingDataset.minimumCountryCount',
+  );
+  final countries = routingRegions
+      .map((region) => region['countryCode'])
+      .whereType<String>()
+      .toSet();
+  final continents = routingRegions
+      .map((region) => region['continent'])
+      .whereType<String>()
+      .toSet();
+  final configuredUpdatedAt = utcTimestamp(
+    baseConfig['generatedAt'],
+    'generatedAt',
+  );
+  if (countries.length < minimumCountries ||
+      !continents.containsAll(requiredContinentsValue.cast<String>())) {
+    throw const AutomationException(
+      'Immutable routing plan does not retain worldwide coverage.',
+    );
+  }
+  for (final region in routingRegions) {
+    final id = string(region['id'], 'region.id');
+    final configuration = ValhallaRoutingRegionConfiguration.fromJson(
+      region['routingBuild'],
+      field: '$id.routingBuild',
+    );
+    if (configuration.releaseTag != routingTag ||
+        configuration.version != version ||
+        configuration.updatedAt != configuredUpdatedAt) {
+      throw AutomationException('$id differs from the coordinated release.');
+    }
+  }
+}
+
+Future<void> _ensureRoutingPlanAsset(
+  GitHubReleaseClient github, {
+  required int releaseId,
+  required File manifestFile,
+  required int exactBytes,
+  required String sha256,
+  required List<Map<String, Object?>> routingRegions,
+  required bool allowCreate,
+}) async {
+  final allowedGraphNames = <String>{
+    for (final region in routingRegions)
+      ValhallaRoutingRegionConfiguration.fromJson(
+        region['routingBuild'],
+        field: '${region['id']}.routingBuild',
+      ).file,
+  };
+  var assets = await github.listAssets(releaseId);
+  if (assets.map((asset) => asset.name).toSet().length != assets.length ||
+      assets.any(
+        (asset) =>
+            asset.name != routingPlanAssetName &&
+            !allowedGraphNames.contains(asset.name),
+      )) {
+    throw const AutomationException(
+      'Routing draft contains an unexpected or duplicate asset.',
+    );
+  }
+  var plan = assets
+      .where((asset) => asset.name == routingPlanAssetName)
+      .toList(growable: false);
+  if (plan.isEmpty) {
+    if (assets.isNotEmpty || !allowCreate) {
+      throw const AutomationException(
+        'Routing draft has graph assets but no immutable routing plan.',
+      );
+    }
+    final upload = File(
+      path.join(manifestFile.parent.path, routingPlanAssetName),
+    );
+    await manifestFile.copy(upload.path);
+    try {
+      await github.uploadAsset(
+        releaseId: releaseId,
+        file: upload,
+        contentType: 'application/json',
+      );
+    } finally {
+      if (await upload.exists()) await upload.delete();
+    }
+    assets = await github.listAssets(releaseId);
+    plan = assets
+        .where((asset) => asset.name == routingPlanAssetName)
+        .toList(growable: false);
+  }
+  if (plan.length != 1 ||
+      !assetMatches(plan.single, exactBytes: exactBytes, sha256: sha256)) {
+    throw const AutomationException(
+      'Routing draft immutable plan differs from this discovery.',
+    );
+  }
+  for (final asset in assets.where(
+    (asset) => asset.name != routingPlanAssetName,
+  )) {
+    final digest = asset.digest;
+    if (asset.state != 'uploaded' ||
+        asset.size <= 0 ||
+        asset.size > maximumGitHubReleaseAssetBytes ||
+        digest == null ||
+        !RegExp(r'^sha256:[a-f0-9]{64}$').hasMatch(digest.toLowerCase())) {
+      throw AutomationException('${asset.name} has invalid remote metadata.');
+    }
+    routingSourceSha256FromAssetLabel(asset.label, expectedPlanSha256: sha256);
+  }
+}
+
+Future<void> _validateCatalogReleaseAssets(
+  GitHubReleaseClient github, {
+  required int releaseId,
+}) async {
+  final assets = await github.listAssets(releaseId);
+  if (assets.map((asset) => asset.name).toSet().length != assets.length ||
+      assets.any((asset) => !catalogMetadataAssetNames.contains(asset.name))) {
+    throw const AutomationException(
+      'Catalog draft contains an unexpected or duplicate asset.',
+    );
+  }
 }
 
 Future<void> _validateReusableDiscovery(
@@ -362,18 +669,5 @@ Future<void> _validatePublishedMapAssets(
         )) {
       throw AutomationException('Published map asset $name is mismatched.');
     }
-  }
-}
-
-void _validateDraft(
-  GitHubRelease release, {
-  required String tag,
-  required String target,
-}) {
-  if (release.tagName != tag ||
-      release.targetCommitish.toLowerCase() != target.toLowerCase() ||
-      !release.draft ||
-      release.prerelease) {
-    throw AutomationException('Draft $tag does not match the reviewed target.');
   }
 }

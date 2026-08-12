@@ -41,6 +41,7 @@ jobs:
     outputs:
       matrix: ${{ steps.outputs.outputs.matrix }}
       no_op: ${{ steps.outputs.outputs.no_op }}
+      requires_build: ${{ steps.outputs.outputs.requires_build }}
       dry_run: ${{ steps.outputs.outputs.dry_run }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,15 +69,6 @@ jobs:
             --output-dir build/plan \
             --cache-dir build/cache \
             "${extra[@]}"
-      - name: Expose bounded matrix
-        id: outputs
-        run: |
-          set -euo pipefail
-          matrix="$(jq -c . build/plan/matrix.json)"
-          test "${#matrix}" -lt 900000
-          no_op="$(jq -er '.noOp | select(type == "boolean")' build/plan/release.json)"
-          printf 'matrix=%s\nno_op=%s\ndry_run=%s\n' \
-            "$matrix" "$no_op" "$INPUT_DRY_RUN" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: routing-plan-${{ github.run_id }}
@@ -85,10 +77,22 @@ jobs:
           retention-days: 30
           compression-level: 9
           overwrite: true
+      - name: Expose bounded matrix
+        id: outputs
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c . build/plan/matrix.json)"
+          test "${#matrix}" -lt 900000
+          jq -e '.noOp | type == "boolean"' build/plan/release.json >/dev/null
+          jq -e '.requiresBuild | type == "boolean"' build/plan/release.json >/dev/null
+          no_op="$(jq -r '.noOp' build/plan/release.json)"
+          requires_build="$(jq -r '.requiresBuild' build/plan/release.json)"
+          printf 'matrix=%s\nno_op=%s\nrequires_build=%s\ndry_run=%s\n' \
+            "$matrix" "$no_op" "$requires_build" "$INPUT_DRY_RUN" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
-    if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.no_op != 'true'
+    if: needs.prepare.outputs.dry_run != 'true'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -114,6 +118,7 @@ jobs:
           name: routing-plan-${{ github.run_id }}
           path: build/plan
       - name: Pull the immutable Valhalla 3.6.3 builder
+        if: needs.prepare.outputs.requires_build == 'true'
         run: |
           set -euo pipefail
           image="$(jq -er '.routingBuilder.image' build/plan/manifest.json)"
@@ -142,7 +147,7 @@ jobs:
 
   finalize:
     needs: [prepare, build]
-    if: needs.prepare.outputs.dry_run != 'true' && needs.prepare.outputs.no_op != 'true'
+    if: needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -150,7 +155,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPOSITORY: ${{ github.repository }}
-      TARGET: ${{ github.sha }}
+      CHECKOUT_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,6 +187,6 @@ jobs:
           set -euo pipefail
           dart run tool/offline_maps/sync_routing_backfill_metadata.dart \
             --repository "$REPOSITORY" \
-            --expected-head "$TARGET" \
+            --expected-head "$CHECKOUT_SHA" \
             --plan-dir build/plan \
             --metadata-dir build/metadata

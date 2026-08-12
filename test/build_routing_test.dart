@@ -136,6 +136,24 @@ void main() {
     final label = routingAssetProvenanceLabel(digest);
     expect(label, '$routingAssetProvenanceLabelPrefix$digest');
     expect(routingSourceSha256FromAssetLabel(label), digest);
+    final plannedLabel = routingAssetProvenanceLabel(
+      digest,
+      planSha256: 'd' * 64,
+    );
+    expect(
+      routingSourceSha256FromAssetLabel(
+        plannedLabel,
+        expectedPlanSha256: 'd' * 64,
+      ),
+      digest,
+    );
+    expect(
+      () => routingSourceSha256FromAssetLabel(
+        plannedLabel,
+        expectedPlanSha256: 'e' * 64,
+      ),
+      throwsA(isA<RoutingBuildException>()),
+    );
     expect(
       () => routingSourceSha256FromAssetLabel(null),
       throwsA(isA<RoutingBuildException>()),

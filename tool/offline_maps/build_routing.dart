@@ -22,6 +22,7 @@ const List<String> supportedRoutingModes = <String>[
 const String routingEngine = 'valhalla';
 const String routingAssetProvenanceLabelPrefix =
     'easyelevation-routing-source-sha256:';
+const String routingAssetPlanLabelSeparator = ':plan-sha256:';
 const String routingDataAttribution = '© OpenStreetMap contributors';
 const String routingDataAttributionUrl =
     'https://www.openstreetmap.org/copyright';
@@ -43,25 +44,50 @@ final RegExp routingAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,210}\.vtiles\.tar$',
 );
 
-String routingAssetProvenanceLabel(String sourceSha256) {
+String routingAssetProvenanceLabel(String sourceSha256, {String? planSha256}) {
   final normalized = sourceSha256.toLowerCase();
   if (!routingSha256Pattern.hasMatch(normalized)) {
     throw const RoutingBuildException(
       'Routing asset provenance requires a valid source SHA-256.',
     );
   }
-  return '$routingAssetProvenanceLabelPrefix$normalized';
+  if (planSha256 == null) {
+    return '$routingAssetProvenanceLabelPrefix$normalized';
+  }
+  final normalizedPlan = planSha256.toLowerCase();
+  if (!routingSha256Pattern.hasMatch(normalizedPlan)) {
+    throw const RoutingBuildException(
+      'Routing asset provenance requires a valid plan SHA-256.',
+    );
+  }
+  return '$routingAssetProvenanceLabelPrefix$normalized'
+      '$routingAssetPlanLabelSeparator$normalizedPlan';
 }
 
-String routingSourceSha256FromAssetLabel(String? label) {
+String routingSourceSha256FromAssetLabel(
+  String? label, {
+  String? expectedPlanSha256,
+}) {
   if (label == null || !label.startsWith(routingAssetProvenanceLabelPrefix)) {
     throw const RoutingBuildException(
       'Existing routing asset lacks its atomic source provenance label.',
     );
   }
-  final digest = label.substring(routingAssetProvenanceLabelPrefix.length);
+  final payload = label.substring(routingAssetProvenanceLabelPrefix.length);
+  final parts = payload.split(routingAssetPlanLabelSeparator);
+  if (parts.length > 2) {
+    throw const RoutingBuildException(
+      'Existing routing asset has an invalid source provenance label.',
+    );
+  }
+  final digest = parts.first;
+  final planDigest = parts.length == 2 ? parts.last : null;
+  final normalizedExpectedPlan = expectedPlanSha256?.toLowerCase();
   if (!routingSha256Pattern.hasMatch(digest) ||
-      label != routingAssetProvenanceLabel(digest)) {
+      (normalizedExpectedPlan != null &&
+          (!routingSha256Pattern.hasMatch(normalizedExpectedPlan) ||
+              planDigest != normalizedExpectedPlan)) ||
+      label != routingAssetProvenanceLabel(digest, planSha256: planDigest)) {
     throw const RoutingBuildException(
       'Existing routing asset has an invalid source provenance label.',
     );

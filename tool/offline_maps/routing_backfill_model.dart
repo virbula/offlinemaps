@@ -5,7 +5,7 @@ import 'build_all.dart' show maximumOfflineMapAssetBytes;
 import 'build_routing.dart';
 import 'release_model.dart';
 
-const int routingBackfillSchemaVersion = 1;
+const int routingBackfillSchemaVersion = 2;
 const int expectedBackfillMapRegionCount = 554;
 const int maximumBackfillRegionsPerShard = 3;
 const int maximumBackfillMatrixJobs = 256;
@@ -15,6 +15,7 @@ const Set<String> catalogMetadataAssetNames = <String>{
   'provenance.json',
   'SHA256SUMS',
 };
+const String routingPlanAssetName = 'routing-plan.json';
 
 String catalogTagForVersion(String version) {
   if (!RegExp(r'^\d{4}\.\d{2}\.\d+$').hasMatch(version)) {

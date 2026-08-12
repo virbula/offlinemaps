@@ -91,6 +91,18 @@ Future<void> finalizeRoutingBackfill(
     release['catalogReleaseId'],
     'release.catalogReleaseId',
   );
+  final planName = string(
+    release['routingPlanAsset'],
+    'release.routingPlanAsset',
+  );
+  final planExactBytes = integer(
+    release['routingPlanExactBytes'],
+    'release.routingPlanExactBytes',
+  );
+  final planSha256 = string(
+    release['routingPlanSha256'],
+    'release.routingPlanSha256',
+  );
   final expectedShards = integer(release['shardCount'], 'release.shardCount');
   final expectedRoutingCount = integer(
     release['routingRegionCount'],
@@ -108,6 +120,11 @@ Future<void> finalizeRoutingBackfill(
       mapReleaseId <= 0 ||
       routingReleaseId <= 0 ||
       catalogReleaseId <= 0 ||
+      planName != routingPlanAssetName ||
+      planExactBytes <= 0 ||
+      !routingSha256Pattern.hasMatch(planSha256) ||
+      await options.manifest.length() != planExactBytes ||
+      await fileSha256(options.manifest) != planSha256 ||
       expectedShards < 1 ||
       expectedShards > maximumBackfillMatrixJobs ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
@@ -128,6 +145,7 @@ Future<void> finalizeRoutingBackfill(
     releaseId: routingReleaseId,
     tag: routingTag,
     target: target,
+    planSha256: planSha256,
     regions: routingRegions,
     repository: repository,
     engineVersion: builder.version,
@@ -180,6 +198,8 @@ Future<void> finalizeRoutingBackfill(
       github,
       releaseId: routingReleaseId,
       routingById: routingById,
+      planExactBytes: planExactBytes,
+      planSha256: planSha256,
     );
     var catalogRelease = await github.releaseById(catalogReleaseId);
     _validateCoordinatedRelease(
@@ -250,6 +270,8 @@ Future<void> finalizeRoutingBackfill(
       github,
       releaseId: routingReleaseId,
       routingById: routingById,
+      planExactBytes: planExactBytes,
+      planSha256: planSha256,
     );
 
     catalogRelease = await github.releaseById(catalogReleaseId);
@@ -301,6 +323,7 @@ Future<Map<String, Map<String, Object?>>> _readReports(
   required int releaseId,
   required String tag,
   required String target,
+  required String planSha256,
   required List<Map<String, Object?>> regions,
   required String repository,
   required String engineVersion,
@@ -331,6 +354,7 @@ Future<Map<String, Map<String, Object?>>> _readReports(
         report['routingReleaseId'] != releaseId ||
         report['routingReleaseTag'] != tag ||
         report['targetCommitish'] != target ||
+        report['routingPlanSha256'] != planSha256 ||
         !RegExp(r'^\d{3}$').hasMatch(shard) ||
         !shards.add(shard)) {
       throw AutomationException('${file.path} has invalid report identity.');
@@ -496,9 +520,12 @@ Future<void> _validateRoutingReleaseAssets(
   GitHubReleaseClient github, {
   required int releaseId,
   required Map<String, Map<String, Object?>> routingById,
+  required int planExactBytes,
+  required String planSha256,
 }) async {
   final assets = await github.listAssets(releaseId);
   final names = <String>{
+    routingPlanAssetName,
     for (final descriptor in routingById.values)
       string(descriptor['file'], 'routing.file'),
   };
@@ -506,6 +533,14 @@ Future<void> _validateRoutingReleaseAssets(
       assets.map((asset) => asset.name).toSet().length != names.length ||
       assets.any((asset) => !names.contains(asset.name))) {
     throw const AutomationException('Routing release asset set is not exact.');
+  }
+  final plan = assets.singleWhere(
+    (asset) => asset.name == routingPlanAssetName,
+  );
+  if (!assetMatches(plan, exactBytes: planExactBytes, sha256: planSha256)) {
+    throw const AutomationException(
+      'Routing release immutable plan asset is mismatched.',
+    );
   }
   for (final descriptor in routingById.values) {
     final name = string(descriptor['file'], 'routing.file');
@@ -520,6 +555,7 @@ Future<void> _validateRoutingReleaseAssets(
         matches.single.label !=
             routingAssetProvenanceLabel(
               string(descriptor['sourceSha256'], '$name.sourceSha256'),
+              planSha256: planSha256,
             )) {
       throw AutomationException('$name failed routing-release verification.');
     }

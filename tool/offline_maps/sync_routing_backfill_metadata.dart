@@ -79,20 +79,10 @@ Future<void> syncRoutingBackfillMetadata({
   }
   final api = _GitDataApi(repository: repository, token: token);
   try {
-    final reference = await api.get('/git/ref/heads/main');
-    final head = string(
-      object(reference['object'], 'ref.object')['sha'],
-      'ref.object.sha',
-    );
-    if (head != expectedHead) {
-      throw AutomationException(
-        'main moved from $expectedHead to $head; metadata was not pushed.',
-      );
-    }
-    final commit = await api.get('/git/commits/$head');
-    final baseTree = string(
-      object(commit['tree'], 'commit.tree')['sha'],
-      'commit.tree.sha',
+    final expectedCommit = await api.get('/git/commits/$expectedHead');
+    final expectedBaseTree = string(
+      object(expectedCommit['tree'], 'expected commit.tree')['sha'],
+      'expected commit.tree.sha',
     );
     final entries = <Map<String, Object?>>[];
     for (final entry in files.entries) {
@@ -108,12 +98,49 @@ Future<void> syncRoutingBackfillMetadata({
       });
     }
     final tree = await api.post('/git/trees', <String, Object?>{
-      'base_tree': baseTree,
+      'base_tree': expectedBaseTree,
       'tree': entries,
     });
+    final candidateTree = string(tree['sha'], 'tree.sha');
+    final expectedMessage = 'Sync offline routing catalog $tag';
+    final reference = await api.get('/git/ref/heads/main');
+    final head = string(
+      object(reference['object'], 'ref.object')['sha'],
+      'ref.object.sha',
+    );
+    if (head != expectedHead) {
+      final currentCommit = await api.get('/git/commits/$head');
+      final parents = objectList(currentCommit['parents'], 'commit.parents');
+      final parentShas = <String>[
+        for (final parent in parents)
+          string(parent['sha'], 'commit.parent.sha'),
+      ];
+      final currentTree = string(
+        object(currentCommit['tree'], 'commit.tree')['sha'],
+        'commit.tree.sha',
+      );
+      if (isExactPriorRoutingSync(
+        parentShas: parentShas,
+        message: currentCommit['message'],
+        treeSha: currentTree,
+        expectedHead: expectedHead,
+        expectedMessage: expectedMessage,
+        expectedTreeSha: candidateTree,
+      )) {
+        stdout.writeln('Routing metadata already matches the prior sync.');
+        return;
+      }
+      throw AutomationException(
+        'main moved from $expectedHead to $head; metadata was not pushed.',
+      );
+    }
+    if (candidateTree == expectedBaseTree) {
+      stdout.writeln('Routing metadata is already current.');
+      return;
+    }
     final next = await api.post('/git/commits', <String, Object?>{
-      'message': 'Sync offline routing catalog $tag',
-      'tree': string(tree['sha'], 'tree.sha'),
+      'message': expectedMessage,
+      'tree': candidateTree,
       'parents': <String>[head],
     });
     await api.patch('/git/refs/heads/main', <String, Object?>{
@@ -124,6 +151,19 @@ Future<void> syncRoutingBackfillMetadata({
     api.close();
   }
 }
+
+bool isExactPriorRoutingSync({
+  required List<String> parentShas,
+  required Object? message,
+  required String treeSha,
+  required String expectedHead,
+  required String expectedMessage,
+  required String expectedTreeSha,
+}) =>
+    parentShas.length == 1 &&
+    parentShas.single == expectedHead &&
+    message == expectedMessage &&
+    treeSha == expectedTreeSha;
 
 class _GitDataApi {
   _GitDataApi({required this.repository, required this.token});

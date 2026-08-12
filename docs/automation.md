@@ -108,6 +108,32 @@ source SHA-256 in the GitHub asset label. A rerun can safely reconstruct the
 descriptor from that label plus GitHub's exact graph size and SHA-256 without
 rebuilding or replacing the graph.
 
+## Initial routing backfill recovery
+
+`routing-backfill.yml` adds Valhalla 3.6.3 graphs to the existing immutable
+`maps-2026.08.1` release without republishing its 554 PMTiles assets. Before the
+first graph upload, the routing draft receives `routing-plan.json`, containing
+the complete generated manifest with every immutable dated Geofabrik PBF URL,
+exact byte count, and MD5. GitHub's size/SHA-256 for this control asset is
+recorded in the Actions plan and verified by every shard and the finalizer.
+
+Each graph asset label binds both the control-plan SHA-256 and the computed PBF
+SHA-256. A fresh dispatch or rerun with existing graph assets downloads the
+control asset through the authenticated GitHub API, verifies its bytes, and
+uses it instead of resolving moving `*-latest` sources. Missing, duplicate, or
+mismatched plans and labels stop before matrix uploads begin. An empty pair of
+drafts can be safely retargeted; once the control plan exists, the original
+coordinated target is retained.
+
+Recovery permits routing-draft/catalog-draft, routing-public/catalog-draft, and
+routing-public/catalog-public states. A public routing release is read-only;
+the matrix only reconstructs reports from its exact assets. Even when both
+releases are already public and the catalog is latest, the workflow regenerates
+reports, verifies every remote digest/label and public URL, and runs metadata
+sync. That routing metadata sync recognizes only its own exact prior one-parent
+commit by parent SHA, commit message, and full candidate tree SHA; unrelated
+branch movement remains fail-closed.
+
 ## Repository security
 
 - Repository-level workflow token default should be **read-only** and “Allow

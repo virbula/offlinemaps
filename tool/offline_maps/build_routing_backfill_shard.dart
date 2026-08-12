@@ -87,9 +87,26 @@ Future<void> buildRoutingBackfillShard(
     'release.routingReleaseId',
   );
   final tag = string(release['routingReleaseTag'], 'release.routingReleaseTag');
+  final planName = string(
+    release['routingPlanAsset'],
+    'release.routingPlanAsset',
+  );
+  final planExactBytes = integer(
+    release['routingPlanExactBytes'],
+    'release.routingPlanExactBytes',
+  );
+  final planSha256 = string(
+    release['routingPlanSha256'],
+    'release.routingPlanSha256',
+  );
   if (release['schemaVersion'] != routingBackfillSchemaVersion ||
       release['mode'] != 'routing-backfill' ||
       releaseId <= 0 ||
+      planName != routingPlanAssetName ||
+      planExactBytes <= 0 ||
+      !routingSha256Pattern.hasMatch(planSha256) ||
+      await options.manifest.length() != planExactBytes ||
+      await fileSha256(options.manifest) != planSha256 ||
       !RegExp(r'^routing-\d{4}\.\d{2}\.\d+$').hasMatch(tag) ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target)) {
     throw const AutomationException('Backfill release identity is invalid.');
@@ -108,6 +125,7 @@ Future<void> buildRoutingBackfillShard(
     );
   }
   final allowedNames = <String>{
+    routingPlanAssetName,
     for (final region in routingRegions)
       ValhallaRoutingRegionConfiguration.fromJson(
         region['routingBuild'],
@@ -121,17 +139,28 @@ Future<void> buildRoutingBackfillShard(
   );
   final records = <Map<String, Object?>>[];
   try {
-    _validateRoutingDraft(
-      await github.releaseById(releaseId),
-      tag: tag,
-      target: target,
-    );
+    final remoteRelease = await github.releaseById(releaseId);
+    _validateRoutingRelease(remoteRelease, tag: tag, target: target);
+    final writable = remoteRelease.draft;
     final initialAssets = await github.listAssets(releaseId);
     if (initialAssets.any((asset) => !allowedNames.contains(asset.name)) ||
         initialAssets.map((asset) => asset.name).toSet().length !=
             initialAssets.length) {
       throw const AutomationException(
         'Routing draft contains an unexpected or duplicate asset.',
+      );
+    }
+    final plans = initialAssets
+        .where((asset) => asset.name == routingPlanAssetName)
+        .toList(growable: false);
+    if (plans.length != 1 ||
+        !assetMatches(
+          plans.single,
+          exactBytes: planExactBytes,
+          sha256: planSha256,
+        )) {
+      throw const AutomationException(
+        'Routing draft does not contain its exact immutable plan.',
       );
     }
     for (final id in options.regionIds) {
@@ -157,9 +186,15 @@ Future<void> buildRoutingBackfillShard(
           configuration: configuration,
           builder: builder,
           repository: repository,
+          planSha256: planSha256,
         );
         stdout.writeln('Keeping verified ${configuration.file}.');
       } else {
+        if (!writable) {
+          throw AutomationException(
+            'Public routing release is missing ${configuration.file}.',
+          );
+        }
         output = File(
           path.join(options.outputDirectory.path, configuration.file),
         );
@@ -204,36 +239,21 @@ Future<void> buildRoutingBackfillShard(
             repository: repository,
             engineVersion: builder.version,
           );
-          _validateRoutingDraft(
-            await github.releaseById(releaseId),
-            tag: tag,
-            target: target,
-          );
+          final current = await github.releaseById(releaseId);
+          _validateRoutingRelease(current, tag: tag, target: target);
+          if (!current.draft) {
+            throw AutomationException(
+              'Routing release became public before ${configuration.file}.',
+            );
+          }
           await github.uploadAsset(
             releaseId: releaseId,
             file: built,
             label: routingAssetProvenanceLabel(
               string(descriptor['sourceSha256'], 'routing.sourceSha256'),
+              planSha256: planSha256,
             ),
           );
-          final remote = (await github.listAssets(releaseId))
-              .where((asset) => asset.name == configuration.file)
-              .toList(growable: false);
-          if (remote.length != 1 ||
-              remote.single.size > maximumGitHubReleaseAssetBytes ||
-              !assetMatches(
-                remote.single,
-                exactBytes: bytes,
-                sha256: string(descriptor['sha256'], 'routing.sha256'),
-              ) ||
-              remote.single.label !=
-                  routingAssetProvenanceLabel(
-                    string(descriptor['sourceSha256'], 'routing.sourceSha256'),
-                  )) {
-            throw AutomationException(
-              '${configuration.file} failed post-upload verification.',
-            );
-          }
         } finally {
           if (await output.exists()) await output.delete();
           if (await cache.exists()) await cache.delete(recursive: true);
@@ -254,6 +274,7 @@ Future<void> buildRoutingBackfillShard(
     'routingReleaseId': releaseId,
     'routingReleaseTag': tag,
     'targetCommitish': target,
+    'routingPlanSha256': planSha256,
     'shard': options.shard,
     'regions': records,
   });
@@ -264,6 +285,7 @@ Future<Map<String, Object?>> _descriptorFromExisting({
   required ValhallaRoutingRegionConfiguration configuration,
   required ValhallaRoutingBuilderConfiguration builder,
   required String repository,
+  required String planSha256,
 }) async {
   final digest = asset.digest?.toLowerCase();
   if (asset.state != 'uploaded' ||
@@ -283,18 +305,20 @@ Future<Map<String, Object?>> _descriptorFromExisting({
     builder: builder,
     exactBytes: asset.size,
     sha256Digest: digest.substring(7),
-    sourceSha256: routingSourceSha256FromAssetLabel(asset.label),
+    sourceSha256: routingSourceSha256FromAssetLabel(
+      asset.label,
+      expectedPlanSha256: planSha256,
+    ),
   );
 }
 
-void _validateRoutingDraft(
+void _validateRoutingRelease(
   GitHubRelease release, {
   required String tag,
   required String target,
 }) {
   if (release.tagName != tag ||
       release.targetCommitish.toLowerCase() != target.toLowerCase() ||
-      !release.draft ||
       release.prerelease) {
     throw AutomationException('Routing draft $tag changed identity or state.');
   }

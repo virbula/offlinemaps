@@ -13,6 +13,12 @@
   1,000-asset cap and publish routing before advertising the map catalog.
 - Added atomic routing source-provenance labels so workflow reruns retain the
   exact uploaded Valhalla graph without assuming byte-for-byte reproducibility.
+- Added a durable `routing-plan.json` release asset and plan-bound graph labels
+  so interrupted routing builds resume the same dated sources without
+  rediscovering moving `*-latest` inputs.
+- Added fail-closed recovery for empty draft retargeting,
+  routing-public/catalog-draft completion, exact public no-op verification, and
+  idempotent atomic metadata synchronization.
 
 ## 1.1.1+1 — 2026-08-11
 
