@@ -442,6 +442,34 @@ void main() {
     expect(workflow, contains('retention-days: 7'));
     expect(workflow, contains(r'(( 10#$INPUT_ITERATION <= 297 ))'));
     expect(workflow, contains(r'test "$INPUT_ITERATION" = 0'));
+    expect(workflow, contains(r'(( 10#$INPUT_VALIDATION_ITERATION <= 18 ))'));
+    expect(
+      workflow,
+      contains(
+        'fromJSON(needs.validate-runtime.outputs.validated_graph_count) >= 1',
+      ),
+    );
+    expect(workflow, contains('validate_routing_release.dart'));
+    expect(workflow, contains(r'routing-validation-${{ github.run_id }}'));
+    final buildJob = RegExp(
+      r'\n  build:\n([\s\S]*?)\n  continue:',
+    ).firstMatch(workflow)?.group(1);
+    final validationJob = RegExp(
+      r'\n  validate-runtime:\n([\s\S]*?)\n  continue-validation:',
+    ).firstMatch(workflow)?.group(1);
+    expect(buildJob, isNotNull);
+    expect(validationJob, isNotNull);
+    expect(buildJob, contains('permissions:\n      contents: write'));
+    expect(validationJob, contains('permissions:\n      contents: read'));
+    expect(validationJob, isNot(contains('contents: write')));
+    expect(
+      workflow,
+      contains('--validation-report build/validation/routing-validation.json'),
+    );
+    expect(
+      workflow,
+      isNot(contains('uploadAsset(\n      releaseId: releaseId')),
+    );
     expect(workflow, contains('--connect-timeout 15 --max-time 60'));
     final workflowLines = workflow.split('\n');
     expect(

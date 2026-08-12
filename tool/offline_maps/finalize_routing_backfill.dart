@@ -9,6 +9,7 @@ import 'build_routing.dart';
 import 'github_release_api.dart';
 import 'release_model.dart';
 import 'routing_backfill_model.dart';
+import 'routing_release_validation.dart';
 
 Future<void> main(List<String> arguments) async {
   try {
@@ -29,6 +30,7 @@ class RoutingBackfillFinalizeOptions {
     required this.release,
     required this.baseCatalog,
     required this.reportsDirectory,
+    required this.validationReport,
     required this.outputDirectory,
     required this.token,
   });
@@ -54,6 +56,7 @@ class RoutingBackfillFinalizeOptions {
       release: File(required('--release')),
       baseCatalog: File(required('--base-catalog')),
       reportsDirectory: Directory(required('--reports-dir')),
+      validationReport: File(required('--validation-report')),
       outputDirectory: Directory(required('--output-dir')),
       token: token,
     );
@@ -63,6 +66,7 @@ class RoutingBackfillFinalizeOptions {
   final File release;
   final File baseCatalog;
   final Directory reportsDirectory;
+  final File validationReport;
   final Directory outputDirectory;
   final String token;
 }
@@ -183,6 +187,15 @@ Future<void> finalizeRoutingBackfill(
               .toList(growable: false)
             ..sort(),
   };
+  final validationGraphs = <RoutingValidationGraph>[
+    for (final graph in routingGraphs)
+      RoutingValidationGraph(
+        graphId: routingGraphIdForRegion(graph),
+        representativeRegionId: string(graph['id'], 'region.id'),
+        aliases: aliasesByGraph[routingGraphIdForRegion(graph)]!,
+        descriptor: descriptorByGraph[routingGraphIdForRegion(graph)]!,
+      ),
+  ]..sort((left, right) => left.graphId.compareTo(right.graphId));
   final roadCatalog = normalizeBackfillRoadCatalog(
     catalog: baseCatalog,
     manifest: manifest,
@@ -242,6 +255,16 @@ Future<void> finalizeRoutingBackfill(
       planExactBytes: planExactBytes,
       planSha256: planSha256,
     );
+    final validationAssets = await github.listAssets(routingReleaseId);
+    release['routingReleaseExactAssetCount'] = validationAssets.length;
+    release['routingReleaseAssetInventorySha256'] = routingAssetInventorySha256(
+      validationAssets,
+    );
+    await verifyRoutingValidationReport(
+      report: options.validationReport,
+      release: release,
+      graphs: validationGraphs,
+    );
     var catalogRelease = await github.releaseById(catalogReleaseId);
     _validateCoordinatedRelease(
       catalogRelease,
@@ -299,6 +322,23 @@ Future<void> finalizeRoutingBackfill(
     }
 
     if (routingRelease.draft) {
+      await _validateRoutingReleaseAssets(
+        github,
+        releaseId: routingReleaseId,
+        routingById: routingByGraph,
+        aliasesByGraph: aliasesByGraph,
+        planExactBytes: planExactBytes,
+        planSha256: planSha256,
+      );
+      final publicationAssets = await github.listAssets(routingReleaseId);
+      release['routingReleaseExactAssetCount'] = publicationAssets.length;
+      release['routingReleaseAssetInventorySha256'] =
+          routingAssetInventorySha256(publicationAssets);
+      await verifyRoutingValidationReport(
+        report: options.validationReport,
+        release: release,
+        graphs: validationGraphs,
+      );
       await github.ensureLightweightTag(
         tag: routingTag,
         target: target,

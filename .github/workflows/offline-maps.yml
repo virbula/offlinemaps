@@ -330,7 +330,7 @@ jobs:
           ROUTING_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          body='{"ref":"main","inputs":{"dry_run":"false","expected_plan_sha":"","iteration":"0"}}'
+          body='{"ref":"main","inputs":{"dry_run":"false","expected_plan_sha":"","iteration":"0","validation_iteration":"0"}}'
           curl --fail-with-body --silent --show-error \
             --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 60 \

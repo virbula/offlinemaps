@@ -66,7 +66,51 @@ The current real-source plan produces 111 deterministic logical shards, but each
 builds only the next incomplete shard (one large graph or up to three small
 graphs). A successful run dispatches the next exact-plan iteration. The shared
 `offlinemaps-release` concurrency queue serializes road, routing, and
-continuation runs. The iteration counter is bounded at 297.
+continuation runs. The build iteration counter is bounded at 297.
+
+Once all graph assets and canonical descriptor sidecars are present, publishing
+is still blocked by a second, resumable runtime-validation phase on the trusted
+self-hosted runner. It processes at most 16 unique graphs sequentially per
+continuation: downloads
+each GitHub release transport part through the authenticated API, verifies the
+part metadata, bytes, and SHA-256, reassembles multipart archives in descriptor
+order, verifies the logical archive's exact size and SHA-256, then opens and
+traverses every tile with `valhalla_build_statistics` from the same digest-pinned
+Valhalla 3.6.3 image. The container has no network, a read-only root filesystem,
+dropped capabilities, and only the one archive plus a temporary output mount.
+
+Successful graph markers live under a directory named by the immutable routing
+plan SHA in the runner tool cache. A restarted runner resumes only markers whose
+plan, graph, descriptor digest, archive identity, engine, image, method, and
+positive tile count still validate. Each graph's downloaded parts, reconstructed
+archive, and statistics output are removed before the next graph begins. A disk
+capacity gate reserves the logical archive, validator overhead, the largest
+transport part, and 5 GiB before each download.
+
+After exact coverage, the workflow creates a canonical `routing-validation.json`
+as a run-scoped Actions artifact. It is bound to the plan SHA and byte count,
+routing release ID/tag/target, exact release-asset inventory digest/count,
+Valhalla image/version, validation method, and all graph markers. It is not a
+release asset and therefore does not alter the immutable routing asset budget or
+the client catalog. The hosted finalizer downloads and revalidates this artifact
+and the unchanged live draft inventory before either coordinated draft can be
+published. Missing, stale, malformed, incomplete, or non-canonical state fails
+closed. Failed or cancelled validation retains completed markers for an exact-
+plan resume. Only after routing/catalog publication succeeds does cleanup
+verify every marker is bound to that plan and remove that exact plan's
+validation-state directory; other plans are preserved. The current 297-graph
+plan therefore needs at most 18 continuation dispatches after its initial
+validation run; the validation iteration is fail-closed at 18. The 16-graph
+batch keeps the existing 24-hour job bound while reducing full prepare/API
+inventory passes from one per graph to one initial validation run plus at most
+18 continuation runs.
+
+If a transient failure occurs after the routing release is public but before
+the coordinated catalog is promoted, a retry may reconstruct the canonical
+validation report only from a complete set of already validated exact-plan
+markers and an unchanged routing asset inventory. A public release with even
+one missing or invalid marker fails closed; validation never downloads or
+traverses a new graph after publication.
 
 Each logical archive may be up to 16 GiB. Archives above GitHub's per-asset
 limit are split into deterministic 1,900 MiB parts. One canonical sidecar
@@ -160,4 +204,9 @@ Tests cover deterministic road/routing shard plans, worldwide source
 selection, concave/hole/dateline geometry, monthly metadata handoff, source
 prefetch and capacity gates, canonical multipart descriptors and
 reconstruction, exact-1,000 asset pagination, plan-cache target safety, release
-state recovery, and atomic metadata synchronization.
+state recovery, routing runtime-validation marker/report identity and multipart
+reassembly, and atomic metadata synchronization. The deterministic unit suite
+does not invoke Docker; `make validate_offline_routing_container` remains the
+real three-mode route smoke test, while the publication gate itself uses a
+full-tile statistics traversal rather than guessing routable coordinates for
+each worldwide extract.
