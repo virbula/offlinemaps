@@ -297,12 +297,65 @@ void main() {
     expect(upperBound, 1 + 297 + 2 * 297);
     expect(upperBound, lessThanOrEqualTo(maximumGitHubReleaseAssets));
     expect(() => validateRoutingReleaseAssetBudget(regions), returnsNormally);
-    expect(maximumRoutingTransportPartsForSource(routingTransportPartBytes), 2);
+    expect(maximumRoutingTransportPartsForSource(16 * 1024 * 1024), 2);
+    expect(maximumRoutingTransportPartsForSource(routingTransportPartBytes), 6);
     expect(
       maximumRoutingTransportPartsForSource(routingTransportPartBytes + 1),
-      3,
+      6,
+    );
+    expect(
+      maximumRoutingTransportPartsForSource(
+        maximumDiscoveredRoutingSourceBytesForRelease,
+      ),
+      9,
     );
   });
+
+  test('reserves enough transport parts for the observed India graph', () {
+    const indiaSourceExactBytes = 1702659452;
+    const indiaArchiveExactBytes = 4367185920;
+    final actualParts =
+        (indiaArchiveExactBytes + routingTransportPartBytes - 1) ~/
+        routingTransportPartBytes;
+
+    expect(actualParts, 3);
+    expect(maximumRoutingTransportPartsForSource(indiaSourceExactBytes), 5);
+    expect(
+      actualParts,
+      lessThanOrEqualTo(
+        maximumRoutingTransportPartsForSource(indiaSourceExactBytes),
+      ),
+    );
+  });
+
+  test(
+    'immutable worldwide plan remains within the GitHub asset cap',
+    () async {
+      final fixture = await readJsonObject(
+        File('test/fixtures/routing-2026.08.1-graph-source-bytes.json'),
+      );
+      final sourceExactBytes = objectList(
+        fixture['graphs'],
+        'fixture.graphs',
+      ).map((graph) => integer(graph['sourceExactBytes'], 'sourceExactBytes'));
+      final graphCount = sourceExactBytes.length;
+      final upperBound =
+          1 +
+          graphCount +
+          sourceExactBytes.fold<int>(
+            0,
+            (sum, bytes) => sum + maximumRoutingTransportPartsForSource(bytes),
+          );
+
+      expect(
+        fixture['routingPlanSha256'],
+        '56d1d4e8ea660a0332d3c318df28ba9f270b87f46a7f4932309eec29db743cc5',
+      );
+      expect(graphCount, 297);
+      expect(upperBound, 993);
+      expect(upperBound, lessThanOrEqualTo(maximumGitHubReleaseAssets));
+    },
+  );
 
   test('validates multipart graph descriptors against ordered parts', () async {
     final region = objectList(

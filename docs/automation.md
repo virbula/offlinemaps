@@ -118,8 +118,10 @@ records aliases, logical size/SHA-256, source provenance, and ordered part
 sizes/SHA-256 values. Preparation computes a source-derived upper bound for
 the complete release (plan + one sidecar per graph + reserved transport parts)
 and requires it to fit GitHub's 1,000-asset limit before any graph upload. The
-same per-graph part allowance is enforced before that graph is uploaded. The
-current 297-graph plan reserves at most 903 release assets.
+same per-graph part allowance is enforced before that graph is uploaded. It
+reserves 4.5 times each compressed source size plus one part, capped by the
+16 GiB logical-archive limit. The current 297-graph plan reserves at most 993
+release assets.
 
 Continuation does not depend on old Actions reports. Intermediate runs
 paginate the exact draft once and use an uploaded, digest-bearing, plan-bound

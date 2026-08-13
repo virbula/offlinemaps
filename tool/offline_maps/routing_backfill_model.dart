@@ -233,13 +233,20 @@ int maximumRoutingTransportPartsForSource(int sourceExactBytes) {
       sourceExactBytes > maximumDiscoveredRoutingSourceBytesForRelease) {
     throw const AutomationException('Routing source size is invalid.');
   }
-  // A graph normally tracks its PBF size closely. Reserve one complete extra
-  // 1.9 GiB part per graph and enforce this same bound before any graph bytes
-  // are uploaded. This makes the release-wide GitHub asset budget knowable at
-  // planning time without pretending Valhalla output size is deterministic.
-  return (sourceExactBytes + routingTransportPartBytes - 1) ~/
-          routingTransportPartBytes +
-      1;
+  // Dense Valhalla graphs can be materially larger than their compressed PBF
+  // input (India expands from 1.70 GB to 4.37 GB). Reserve 4.5 times the source
+  // bytes, plus one complete part for archive/tar variance, capped by the
+  // physical 16 GiB logical-archive limit. Integer-only arithmetic keeps this
+  // deterministic across every planner and runner. The current immutable
+  // 297-graph plan totals at most 993 assets, below GitHub's hard 1,000 limit.
+  final expandedParts =
+      (9 * sourceExactBytes + 2 * routingTransportPartBytes - 1) ~/
+      (2 * routingTransportPartBytes);
+  final physicalParts =
+      (maximumRoutingAssetBytes + routingTransportPartBytes - 1) ~/
+      routingTransportPartBytes;
+  final reserved = expandedParts + 1;
+  return reserved < physicalParts ? reserved : physicalParts;
 }
 
 int plannedRoutingReleaseAssetUpperBound(
