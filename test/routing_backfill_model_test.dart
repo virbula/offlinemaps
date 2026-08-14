@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:test/test.dart';
 
 import '../tool/offline_maps/build_routing.dart';
+import '../tool/offline_maps/github_release_api.dart';
 import '../tool/offline_maps/release_model.dart';
 import '../tool/offline_maps/routing_backfill_model.dart';
 
@@ -274,6 +275,142 @@ void main() {
     expect(first.indexOf('a-road'), lessThan(first.indexOf('z-road')));
   });
 
+  test('superseded routing bindings retain one exact historical plan', () {
+    final oldPlan = 'a' * 64;
+    final currentPlan = 'b' * 64;
+    final label = routingAssetProvenanceLabel('c' * 64, planSha256: oldPlan);
+    final descriptor = GitHubReleaseAsset(
+      id: 2,
+      name: supersededRoutingDescriptorAssetName(
+        planSha256: oldPlan,
+        graphId: 'andorra',
+      ),
+      size: 2048,
+      digest: 'sha256:${'d' * 64}',
+      state: 'uploaded',
+      label: label,
+    );
+    final assets = <GitHubReleaseAsset>[
+      GitHubReleaseAsset(
+        id: 1,
+        name: supersededRoutingPlanAssetName(oldPlan),
+        size: 900000,
+        digest: 'sha256:$oldPlan',
+        state: 'uploaded',
+        label: supersededRoutingBindingInventoryLabel(<GitHubReleaseAsset>[
+          descriptor,
+        ]),
+      ),
+      descriptor,
+    ];
+
+    expect(
+      () => validateSupersededRoutingBindingAssets(
+        assets: assets,
+        currentPlanSha256: currentPlan,
+      ),
+      returnsNormally,
+    );
+    expect(
+      assets.every((asset) => isSupersededRoutingBindingAssetName(asset.name)),
+      isTrue,
+    );
+  });
+
+  test('superseded descriptor without its exact plan fails closed', () {
+    final oldPlan = 'a' * 64;
+    expect(
+      () => validateSupersededRoutingBindingAssets(
+        assets: <GitHubReleaseAsset>[
+          GitHubReleaseAsset(
+            id: 2,
+            name: supersededRoutingDescriptorAssetName(
+              planSha256: oldPlan,
+              graphId: 'andorra',
+            ),
+            size: 2048,
+            digest: 'sha256:${'d' * 64}',
+            state: 'uploaded',
+            label: routingAssetProvenanceLabel('c' * 64, planSha256: oldPlan),
+          ),
+        ],
+        currentPlanSha256: 'b' * 64,
+      ),
+      throwsA(isA<AutomationException>()),
+    );
+  });
+
+  test('corrected plan requires all 111 retained bindings', () {
+    final descriptors = <GitHubReleaseAsset>[
+      for (
+        var index = 0;
+        index < supersededRoutingPlan2026081DescriptorCount;
+        index++
+      )
+        GitHubReleaseAsset(
+          id: index + 2,
+          name: supersededRoutingDescriptorAssetName(
+            planSha256: supersededRoutingPlan2026081Sha256,
+            graphId: 'graph-${index.toString().padLeft(3, '0')}',
+          ),
+          size: 2048,
+          digest: 'sha256:${(index + 1).toRadixString(16).padLeft(64, '0')}',
+          state: 'uploaded',
+          label: routingAssetProvenanceLabel(
+            'c' * 64,
+            planSha256: supersededRoutingPlan2026081Sha256,
+          ),
+        ),
+    ];
+    final assets = <GitHubReleaseAsset>[
+      GitHubReleaseAsset(
+        id: 1,
+        name: supersededRoutingPlanAssetName(
+          supersededRoutingPlan2026081Sha256,
+        ),
+        size: 945557,
+        digest: 'sha256:$supersededRoutingPlan2026081Sha256',
+        state: 'uploaded',
+        label: supersededRoutingBindingInventoryLabel(descriptors),
+      ),
+      ...descriptors,
+    ];
+
+    expect(
+      () => validateSupersededRoutingBindingAssets(
+        assets: assets,
+        currentPlanSha256: correctedRoutingPlan2026081Sha256,
+      ),
+      returnsNormally,
+    );
+    expect(
+      () => validateSupersededRoutingBindingAssets(
+        assets: assets.sublist(0, assets.length - 1),
+        currentPlanSha256: correctedRoutingPlan2026081Sha256,
+      ),
+      throwsA(isA<AutomationException>()),
+    );
+    final tampered = <GitHubReleaseAsset>[
+      ...assets.sublist(0, 2),
+      GitHubReleaseAsset(
+        id: assets[2].id,
+        name: assets[2].name,
+        size: assets[2].size,
+        digest: 'sha256:${'f' * 64}',
+        state: assets[2].state,
+        label: assets[2].label,
+      ),
+      ...assets.sublist(3),
+    ];
+    expect(
+      () => validateSupersededRoutingBindingAssets(
+        assets: tampered,
+        currentPlanSha256: correctedRoutingPlan2026081Sha256,
+      ),
+      throwsA(isA<AutomationException>()),
+    );
+  });
+
   test('routing asset budget is bounded before the first upload', () {
     final regions = <Map<String, Object?>>[
       for (var index = 0; index < 297; index++)
@@ -349,10 +486,10 @@ void main() {
 
       expect(
         fixture['routingPlanSha256'],
-        '56d1d4e8ea660a0332d3c318df28ba9f270b87f46a7f4932309eec29db743cc5',
+        '7725fa807a720a4df95593de799921e47a37ce09aa460d91acdab8675440d134',
       );
-      expect(graphCount, 297);
-      expect(upperBound, 993);
+      expect(graphCount, 296);
+      expect(upperBound, 990);
       expect(upperBound, lessThanOrEqualTo(maximumGitHubReleaseAssets));
     },
   );

@@ -358,6 +358,131 @@ void main() {
     expect(asset.label, 'easyelevation-routing-source-sha256:${'b' * 64}');
   });
 
+  test('asset metadata update retains exact immutable bytes', () async {
+    final original = GitHubReleaseAsset.fromJson(<String, Object?>{
+      'id': 7,
+      'name': 'original.json',
+      'size': 42,
+      'digest': 'sha256:${'a' * 64}',
+      'state': 'uploaded',
+      'label': 'old',
+    });
+    Map<String, Object?>? sent;
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        expect(method, 'PATCH');
+        expect(uri.path, '/repos/virbula/offlinemaps/releases/assets/7');
+        sent = jsonBody;
+        return (
+          statusCode: 200,
+          body: jsonEncode(<String, Object?>{
+            'id': 7,
+            'name': 'retained.json',
+            'size': 42,
+            'digest': 'sha256:${'a' * 64}',
+            'state': 'uploaded',
+            'label': 'new',
+          }),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    final updated = await client.updateAssetMetadata(
+      asset: original,
+      name: 'retained.json',
+      label: 'new',
+    );
+
+    expect(sent, <String, Object?>{'name': 'retained.json', 'label': 'new'});
+    expect(updated.name, 'retained.json');
+    expect(updated.digest, original.digest);
+    expect(updated.size, original.size);
+  });
+
+  test('routing migration fast-forwards a lightweight tag once', () async {
+    final previous = 'a' * 40;
+    final target = 'b' * 40;
+    final requests = <(String, String, Map<String, Object?>?)>[];
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        requests.add((method, uri.path, jsonBody));
+        return method == 'GET'
+            ? (
+                statusCode: 200,
+                body: jsonEncode(
+                  _tagRefJson('routing-2026.08.1', target: previous),
+                ),
+              )
+            : (
+                statusCode: 200,
+                body: jsonEncode(
+                  _tagRefJson('routing-2026.08.1', target: target),
+                ),
+              );
+      },
+    );
+    addTearDown(client.close);
+
+    final updated = await client.advanceLightweightTag(
+      tag: 'routing-2026.08.1',
+      previousTarget: previous,
+      target: target,
+    );
+
+    expect(updated.objectSha, target);
+    expect(requests.map((request) => request.$1), <String>['GET', 'PATCH']);
+    expect(
+      requests.last.$2,
+      '/repos/virbula/offlinemaps/git/refs/tags/routing-2026.08.1',
+    );
+    expect(requests.last.$3, <String, Object?>{'sha': target, 'force': false});
+  });
+
+  test('routing migration retargets a draft without losing its tag', () async {
+    final previous = 'a' * 40;
+    final target = 'b' * 40;
+    Map<String, Object?>? sent;
+    final release = GitHubRelease.fromJson(<String, Object?>{
+      ..._releaseJson,
+      'tag_name': 'routing-2026.08.1',
+      'target_commitish': previous,
+    });
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        sent = jsonBody;
+        return (
+          statusCode: 200,
+          body: jsonEncode(<String, Object?>{
+            ..._releaseJson,
+            'tag_name': 'routing-2026.08.1',
+            'target_commitish': target,
+          }),
+        );
+      },
+    );
+    addTearDown(client.close);
+
+    final updated = await client.retargetDraft(
+      release: release,
+      previousTarget: previous,
+      target: target,
+    );
+
+    expect(updated.tagName, 'routing-2026.08.1');
+    expect(updated.targetCommitish, target);
+    expect(sent!['tag_name'], 'routing-2026.08.1');
+    expect(sent!['target_commitish'], target);
+    expect(sent!['draft'], isTrue);
+    expect(sent!['make_latest'], 'false');
+  });
+
   test('POST server response is not blindly retried', () async {
     final delays = <Duration>[];
     var calls = 0;

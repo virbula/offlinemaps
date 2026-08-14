@@ -359,9 +359,20 @@ void _validateRoutingAssets({
     );
   }
   final actualNames = assets.map((asset) => asset.name).toList(growable: false);
-  if (assets.length != expectedNames.length ||
-      actualNames.toSet().length != expectedNames.length ||
-      actualNames.any((name) => !expectedNames.contains(name))) {
+  final superseded = assets
+      .where((asset) => isSupersededRoutingBindingAssetName(asset.name))
+      .toList(growable: false);
+  validateSupersededRoutingBindingAssets(
+    assets: superseded,
+    currentPlanSha256: planSha256,
+  );
+  if (assets.length != expectedNames.length + superseded.length ||
+      actualNames.toSet().length != assets.length ||
+      actualNames.any(
+        (name) =>
+            !expectedNames.contains(name) &&
+            !isSupersededRoutingBindingAssetName(name),
+      )) {
     throw const AutomationException(
       'Routing draft asset set is not exact for runtime validation.',
     );

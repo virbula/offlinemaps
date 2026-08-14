@@ -23,6 +23,11 @@ on:
         required: true
         type: string
         default: '0'
+      migrate_corrected_plan:
+        description: One-shot reviewed routing-2026.08.1 plan correction
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: offlinemaps-release
@@ -87,6 +92,7 @@ jobs:
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
       INPUT_EXPECTED_PLAN_SHA: ${{ inputs.expected_plan_sha }}
       INPUT_ITERATION: ${{ inputs.iteration }}
+      INPUT_MIGRATE_CORRECTED_PLAN: ${{ inputs.migrate_corrected_plan }}
       INPUT_VALIDATION_ITERATION: ${{ inputs.validation_iteration }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,6 +102,19 @@ jobs:
         with:
           sdk: ${{ env.DART_VERSION }}
       - run: make deps
+      - name: Preserve completed assets and migrate the reviewed corrected plan
+        if: inputs.migrate_corrected_plan == true
+        run: |
+          set -euo pipefail
+          test "$INPUT_DRY_RUN" = false
+          test -z "$INPUT_EXPECTED_PLAN_SHA"
+          test "$INPUT_ITERATION" = 0
+          test "$INPUT_VALIDATION_ITERATION" = 0
+          dart run tool/offline_maps/migrate_routing_plan.dart \
+            --repository "$REPOSITORY" \
+            --target "$TARGET" \
+            --expected-completed-graphs 110 \
+            --output-dir build/routing-plan-migration
       - name: Discover immutable graph sources and create coordinated drafts
         run: |
           set -euo pipefail
@@ -148,6 +167,11 @@ jobs:
             test "$INPUT_ITERATION" = 0
             test "$INPUT_VALIDATION_ITERATION" = 0
           fi
+          if [[ "$INPUT_MIGRATE_CORRECTED_PLAN" == true ]]; then
+            test "$plan_sha" = 7725fa807a720a4df95593de799921e47a37ce09aa460d91acdab8675440d134
+            test "$INPUT_ITERATION" = 0
+            test "$INPUT_VALIDATION_ITERATION" = 0
+          fi
           if [[ "$pending" == true ]]; then
             jq -e '.include | length == 1' build/plan/matrix.json >/dev/null
             test "$INPUT_VALIDATION_ITERATION" = 0
@@ -188,7 +212,10 @@ jobs:
           mkdir -p "$ROUTING_CACHE_ROOT"
           free_disk_bytes="$(df -Pk "$ROUTING_CACHE_ROOT" | awk 'NR==2 {print $4 * 1024}')"
           marker="$ROUTING_CACHE_ROOT/$plan_sha256/ready.json"
-          if [[ -f "$marker" ]]; then
+          superseded_plan_sha256=56d1d4e8ea660a0332d3c318df28ba9f270b87f46a7f4932309eec29db743cc5
+          corrected_plan_sha256=7725fa807a720a4df95593de799921e47a37ce09aa460d91acdab8675440d134
+          superseded_marker="$ROUTING_CACHE_ROOT/$superseded_plan_sha256/ready.json"
+          if [[ -f "$marker" || ( "$plan_sha256" = "$corrected_plan_sha256" && -f "$superseded_marker" ) ]]; then
             required_disk_bytes="$((100 * 1024 * 1024 * 1024))"
           else
             required_disk_bytes="$(( $(jq -er '.routingSourceExactBytes' build/plan/release.json) + 100 * 1024 * 1024 * 1024 ))"
@@ -308,7 +335,7 @@ jobs:
           [[ "$ITERATION" =~ ^[0-9]{1,3}$ ]]
           next_iteration="$((10#$ITERATION + 1))"
           test "$next_iteration" -le 297
-          body="$(jq -cn --arg plan "$PLAN_SHA" --arg iteration "$next_iteration" '{ref:"main",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:"0"}}')"
+          body="$(jq -cn --arg plan "$PLAN_SHA" --arg iteration "$next_iteration" '{ref:"main",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:"0",migrate_corrected_plan:"false"}}')"
           curl --fail-with-body --silent --show-error \
             --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 60 \
@@ -434,7 +461,7 @@ jobs:
             --arg plan "$PLAN_SHA" \
             --arg iteration "$BUILD_ITERATION" \
             --arg validation_iteration "$next_validation_iteration" \
-            '{ref:"main",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:$validation_iteration}}')"
+            '{ref:"main",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:$validation_iteration,migrate_corrected_plan:"false"}}')"
           curl --fail-with-body --silent --show-error \
             --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 60 \

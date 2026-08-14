@@ -266,8 +266,8 @@ under `build/local/routing-graphs`. Override those variables when a larger
 volume is needed. Local builds use the same pinned container and multipart
 format as the self-hosted Actions runner.
 
-The current worldwide plan has 554 road maps, 549 routing-enabled map aliases,
-and 297 unique routing graphs. Production publication uses three coordinated
+The current worldwide plan has 554 road maps, 548 routing-enabled map aliases,
+and 296 unique routing graphs. Production publication uses three coordinated
 releases: immutable `maps-<version>` roads, immutable
 `routing-<version>` graphs, and the latest `catalog-<version>` joined metadata.
 `road-catalog.json` remains available in the joined release as a routing-free

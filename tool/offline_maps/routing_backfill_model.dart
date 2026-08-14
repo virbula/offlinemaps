@@ -1,8 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 import 'build_all.dart' show maximumOfflineMapAssetBytes;
 import 'build_routing.dart';
+import 'github_release_api.dart';
 import 'release_model.dart';
 
 const int routingBackfillSchemaVersion = 2;
@@ -22,6 +25,187 @@ const Set<String> joinedCatalogMetadataAssetNames = <String>{
   'road-catalog.json',
 };
 const String routingPlanAssetName = 'routing-plan.json';
+const String correctedRoutingPlan2026081Sha256 =
+    '7725fa807a720a4df95593de799921e47a37ce09aa460d91acdab8675440d134';
+const String supersededRoutingPlan2026081Sha256 =
+    '56d1d4e8ea660a0332d3c318df28ba9f270b87f46a7f4932309eec29db743cc5';
+const int supersededRoutingPlan2026081DescriptorCount = 110;
+const String supersededRoutingBindingInventoryLabelPrefix =
+    'easyelevation-superseded-routing-bindings-sha256:';
+final RegExp supersededRoutingPlanAssetPattern = RegExp(
+  r'^superseded-routing-plan\.([a-f0-9]{64})\.json$',
+);
+final RegExp supersededRoutingDescriptorAssetPattern = RegExp(
+  r'^superseded-routing-descriptor\.([a-f0-9]{64})\.'
+  r'([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.json$',
+);
+
+String supersededRoutingPlanAssetName(String planSha256) {
+  if (!routingSha256Pattern.hasMatch(planSha256)) {
+    throw const AutomationException(
+      'Superseded routing plan identity is invalid.',
+    );
+  }
+  return 'superseded-routing-plan.$planSha256.json';
+}
+
+String supersededRoutingDescriptorAssetName({
+  required String planSha256,
+  required String graphId,
+}) {
+  if (!routingSha256Pattern.hasMatch(planSha256) ||
+      !routingGraphIdPattern.hasMatch(graphId)) {
+    throw const AutomationException(
+      'Superseded routing descriptor identity is invalid.',
+    );
+  }
+  return 'superseded-routing-descriptor.$planSha256.$graphId.json';
+}
+
+bool isSupersededRoutingBindingAssetName(String name) =>
+    supersededRoutingPlanAssetPattern.hasMatch(name) ||
+    supersededRoutingDescriptorAssetPattern.hasMatch(name);
+
+String supersededRoutingBindingInventoryLabel(
+  Iterable<GitHubReleaseAsset> descriptorAssets,
+) {
+  final descriptors = descriptorAssets.toList(growable: false)
+    ..sort((left, right) => left.name.compareTo(right.name));
+  if (descriptors.isEmpty ||
+      descriptors.any(
+        (asset) =>
+            supersededRoutingDescriptorAssetPattern.firstMatch(asset.name) ==
+                null ||
+            asset.size <= 0 ||
+            asset.digest == null ||
+            !RegExp(r'^sha256:[a-f0-9]{64}$').hasMatch(asset.digest!) ||
+            asset.label == null,
+      )) {
+    throw const AutomationException(
+      'Superseded routing descriptor inventory is invalid.',
+    );
+  }
+  final encoded = jsonEncode(<Map<String, Object?>>[
+    for (final asset in descriptors)
+      <String, Object?>{
+        'name': asset.name,
+        'exactBytes': asset.size,
+        'sha256': asset.digest!.substring('sha256:'.length),
+        'label': asset.label,
+      },
+  ]);
+  return '$supersededRoutingBindingInventoryLabelPrefix'
+      '${sha256.convert(utf8.encode(encoded))}';
+}
+
+bool isSupersededRoutingBindingInventoryLabel(String? label) =>
+    label != null &&
+    RegExp(
+      '^${RegExp.escape(supersededRoutingBindingInventoryLabelPrefix)}'
+      r'[a-f0-9]{64}$',
+    ).hasMatch(label);
+
+/// Validates the historical plan and descriptor bindings retained after a
+/// fail-closed routing-plan correction.
+///
+/// Superseded payload bytes are intentionally not copied: active payload
+/// assets are rebound to the corrected plan by changing only their GitHub
+/// provenance label. The immutable old plan and every old canonical sidecar
+/// remain as separately named assets, so no completed descriptor-bound asset
+/// is deleted during the migration.
+void validateSupersededRoutingBindingAssets({
+  required List<GitHubReleaseAsset> assets,
+  required String currentPlanSha256,
+}) {
+  if (!routingSha256Pattern.hasMatch(currentPlanSha256)) {
+    throw const AutomationException('Current routing plan SHA-256 is invalid.');
+  }
+  final plans = <String, GitHubReleaseAsset>{};
+  final descriptors = <String>{};
+  for (final asset in assets) {
+    final planMatch = supersededRoutingPlanAssetPattern.firstMatch(asset.name);
+    final descriptorMatch = supersededRoutingDescriptorAssetPattern.firstMatch(
+      asset.name,
+    );
+    if (planMatch == null && descriptorMatch == null) {
+      throw AutomationException(
+        '${asset.name} is not a superseded routing binding asset.',
+      );
+    }
+    if (asset.id <= 0 ||
+        asset.state != 'uploaded' ||
+        asset.size <= 0 ||
+        asset.size > 1024 * 1024 ||
+        asset.digest == null ||
+        !RegExp(r'^sha256:[a-f0-9]{64}$').hasMatch(asset.digest!)) {
+      throw AutomationException(
+        '${asset.name} has invalid superseded binding metadata.',
+      );
+    }
+    if (planMatch != null) {
+      final planSha256 = planMatch.group(1)!;
+      if (planSha256 == currentPlanSha256 ||
+          asset.digest != 'sha256:$planSha256' ||
+          plans.containsKey(planSha256)) {
+        throw AutomationException(
+          '${asset.name} has an invalid superseded plan binding.',
+        );
+      }
+      plans[planSha256] = asset;
+      continue;
+    }
+    final planSha256 = descriptorMatch!.group(1)!;
+    final graphId = descriptorMatch.group(2)!;
+    routingSourceSha256FromAssetLabel(
+      asset.label,
+      expectedPlanSha256: planSha256,
+    );
+    if (planSha256 == currentPlanSha256 ||
+        !descriptors.add('$planSha256/$graphId')) {
+      throw AutomationException(
+        '${asset.name} has an invalid superseded descriptor binding.',
+      );
+    }
+  }
+  for (final asset in assets) {
+    final descriptorMatch = supersededRoutingDescriptorAssetPattern.firstMatch(
+      asset.name,
+    );
+    if (descriptorMatch != null &&
+        !plans.containsKey(descriptorMatch.group(1))) {
+      throw AutomationException(
+        '${asset.name} has no retained superseded routing plan.',
+      );
+    }
+  }
+  for (final entry in plans.entries) {
+    final boundDescriptors = assets.where((asset) {
+      final match = supersededRoutingDescriptorAssetPattern.firstMatch(
+        asset.name,
+      );
+      return match != null && match.group(1) == entry.key;
+    });
+    if (entry.value.label !=
+        supersededRoutingBindingInventoryLabel(boundDescriptors)) {
+      throw AutomationException(
+        '${entry.value.name} does not bind the exact descriptor inventory.',
+      );
+    }
+  }
+  if (currentPlanSha256 == correctedRoutingPlan2026081Sha256 &&
+      (assets.length != supersededRoutingPlan2026081DescriptorCount + 1 ||
+          plans.length != 1 ||
+          !plans.containsKey(supersededRoutingPlan2026081Sha256) ||
+          descriptors.length != supersededRoutingPlan2026081DescriptorCount ||
+          descriptors.any(
+            (binding) =>
+                !binding.startsWith('$supersededRoutingPlan2026081Sha256/'),
+          ))) {
+    throw const AutomationException(
+      'Corrected routing plan must retain all 111 superseded bindings.',
+    );
+  }
+}
 
 Map<String, Object?> routingDescriptorSidecar({
   required String planSha256,
@@ -238,7 +422,7 @@ int maximumRoutingTransportPartsForSource(int sourceExactBytes) {
   // bytes, plus one complete part for archive/tar variance, capped by the
   // physical 16 GiB logical-archive limit. Integer-only arithmetic keeps this
   // deterministic across every planner and runner. The current immutable
-  // 297-graph plan totals at most 993 assets, below GitHub's hard 1,000 limit.
+  // 296-graph plan totals at most 990 assets, below GitHub's hard 1,000 limit.
   final expandedParts =
       (9 * sourceExactBytes + 2 * routingTransportPartBytes - 1) ~/
       (2 * routingTransportPartBytes);

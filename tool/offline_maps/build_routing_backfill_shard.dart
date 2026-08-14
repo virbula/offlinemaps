@@ -152,6 +152,13 @@ Future<void> buildRoutingBackfillShard(
     _validateRoutingRelease(remoteRelease, tag: tag, target: target);
     final writable = remoteRelease.draft;
     final initialAssets = await github.listAssets(releaseId);
+    final superseded = initialAssets
+        .where((asset) => isSupersededRoutingBindingAssetName(asset.name))
+        .toList(growable: false);
+    validateSupersededRoutingBindingAssets(
+      assets: superseded,
+      currentPlanSha256: planSha256,
+    );
     if (initialAssets.any(
           (asset) => !_isAllowedRoutingAssetName(asset.name, configurations),
         ) ||
@@ -626,7 +633,10 @@ bool _isAllowedRoutingAssetName(
   String name,
   List<ValhallaRoutingRegionConfiguration> configurations,
 ) {
-  if (name == routingPlanAssetName) return true;
+  if (name == routingPlanAssetName ||
+      isSupersededRoutingBindingAssetName(name)) {
+    return true;
+  }
   for (final configuration in configurations) {
     if (name == configuration.file ||
         name == routingDescriptorAssetName(configuration.file) ||

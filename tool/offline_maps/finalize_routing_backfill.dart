@@ -352,9 +352,19 @@ Future<void> finalizeRoutingBackfill(
       routingRelease = await github.publishNotLatest(routingReleaseId);
       _validatePublic(routingRelease, tag: routingTag, target: target);
     }
-    await _verifyPublicRouting(
+    final publicRoutingAssets = await github.listAssets(routingReleaseId);
+    final retainedBindings = publicRoutingAssets
+        .where((asset) => isSupersededRoutingBindingAssetName(asset.name))
+        .toList(growable: false);
+    validateSupersededRoutingBindingAssets(
+      assets: retainedBindings,
+      currentPlanSha256: planSha256,
+    );
+    await verifyPublicRoutingAssets(
       repository: repository,
       tag: routingTag,
+      plan: options.manifest,
+      retainedBindings: retainedBindings,
       descriptors: routingByGraph.values,
       aliasesByGraph: aliasesByGraph,
       planSha256: planSha256,
@@ -660,9 +670,20 @@ Future<void> _validateRoutingReleaseAssets(
       names.add(file);
     }
   }
-  if (assets.length != names.length ||
-      assets.map((asset) => asset.name).toSet().length != names.length ||
-      assets.any((asset) => !names.contains(asset.name))) {
+  final superseded = assets
+      .where((asset) => isSupersededRoutingBindingAssetName(asset.name))
+      .toList(growable: false);
+  validateSupersededRoutingBindingAssets(
+    assets: superseded,
+    currentPlanSha256: planSha256,
+  );
+  if (assets.length != names.length + superseded.length ||
+      assets.map((asset) => asset.name).toSet().length != assets.length ||
+      assets.any(
+        (asset) =>
+            !names.contains(asset.name) &&
+            !isSupersededRoutingBindingAssetName(asset.name),
+      )) {
     throw const AutomationException('Routing release asset set is not exact.');
   }
   final plan = assets.singleWhere(
@@ -799,14 +820,64 @@ void _validatePublic(
   if (release.draft) throw AutomationException('$tag is still a draft.');
 }
 
-Future<void> _verifyPublicRouting({
+typedef RoutingPublicAssetVerifier =
+    Future<void> Function({
+      required Uri url,
+      required int exactBytes,
+      required String digest,
+      required bool allowRange,
+    });
+
+Future<void> verifyPublicRoutingAssets({
   required String repository,
   required String tag,
+  required File plan,
+  required List<GitHubReleaseAsset> retainedBindings,
   required Iterable<Map<String, Object?>> descriptors,
   required Map<String, List<String>> aliasesByGraph,
   required String planSha256,
+  RoutingPublicAssetVerifier? publicVerifier,
 }) async {
+  final verify = publicVerifier ?? _retryPublic;
   final pending = <Future<void>>[];
+  pending.add(
+    verify(
+      url: Uri.https(
+        'github.com',
+        '/$repository/releases/download/$tag/$routingPlanAssetName',
+      ),
+      exactBytes: await plan.length(),
+      digest: await fileSha256(plan),
+      allowRange: false,
+    ),
+  );
+  for (final asset in retainedBindings) {
+    final digest = asset.digest;
+    if (digest == null || !digest.startsWith('sha256:')) {
+      throw AutomationException(
+        '${asset.name} has no public verification digest.',
+      );
+    }
+    pending.add(
+      verify(
+        url: Uri.https(
+          'github.com',
+          '/$repository/releases/download/$tag/${asset.name}',
+        ),
+        exactBytes: asset.size,
+        digest: digest.substring('sha256:'.length),
+        allowRange: false,
+      ),
+    );
+    if (pending.length == 8) {
+      await Future.wait(pending);
+      pending.clear();
+    }
+  }
+  if (pending.isNotEmpty) {
+    await Future.wait(pending);
+    pending.clear();
+  }
   for (final descriptor in descriptors) {
     final graphId = string(descriptor['graphId'], 'routing.graphId');
     final aliases = aliasesByGraph[graphId];
@@ -821,7 +892,7 @@ Future<void> _verifyPublicRouting({
     );
     final sidecarBytes = utf8.encode(sidecarContents);
     pending.add(
-      _retryPublic(
+      verify(
         url: Uri.https(
           'github.com',
           '/$repository/releases/download/$tag/'
@@ -837,28 +908,28 @@ Future<void> _verifyPublicRouting({
       for (final raw in parts) {
         final part = object(raw, 'routing.part');
         pending.add(
-          _retryPublic(
+          verify(
             url: httpsUri(part['downloadUrl'], 'routing.part.downloadUrl'),
             exactBytes: integer(part['exactBytes'], 'routing.part.exactBytes'),
             digest: string(part['sha256'], 'routing.part.sha256'),
             allowRange: true,
           ),
         );
-        if (pending.length == 8) {
+        if (pending.length >= 8) {
           await Future.wait(pending);
           pending.clear();
         }
       }
     } else {
       pending.add(
-        _retryPublic(
+        verify(
           url: httpsUri(descriptor['downloadUrl'], 'routing.downloadUrl'),
           exactBytes: integer(descriptor['exactBytes'], 'routing.exactBytes'),
           digest: string(descriptor['sha256'], 'routing.sha256'),
           allowRange: true,
         ),
       );
-      if (pending.length == 8) {
+      if (pending.length >= 8) {
         await Future.wait(pending);
         pending.clear();
       }

@@ -32,9 +32,9 @@ can fall back to `road-catalog.json` when routing is unavailable.
 ## Worldwide routing backfill
 
 `.github/workflows/routing-backfill.yml` is a trusted `workflow_dispatch` flow
-for `virbula/offlinemaps` on `main`. It currently resolves 549 map aliases to
-297 unique Valhalla graphs; four remote territories (`GS`, `IO`, `PM`, `TF`)
-and the world overview remain explicitly map-only. Matching prefers exact ISO
+for `virbula/offlinemaps` on `main`. It currently resolves 548 map aliases to
+296 unique Valhalla graphs; five remote territories (`GS`, `HM`, `IO`, `PM`,
+`TF`) and the world overview remain explicitly map-only. Matching prefers exact ISO
 country/subdivision metadata. Its conservative spatial fallback checks every
 polygon vertex and boundary, respects holes and concavity, handles the
 antimeridian, and never accepts a continent graph.
@@ -98,7 +98,7 @@ published. Missing, stale, malformed, incomplete, or non-canonical state fails
 closed. Failed or cancelled validation retains completed markers for an exact-
 plan resume. Only after routing/catalog publication succeeds does cleanup
 verify every marker is bound to that plan and remove that exact plan's
-validation-state directory; other plans are preserved. The current 297-graph
+validation-state directory; other plans are preserved. The current 296-graph
 plan therefore needs at most 18 continuation dispatches after its initial
 validation run; the validation iteration is fail-closed at 18. The 16-graph
 batch keeps the existing 24-hour job bound while reducing full prepare/API
@@ -120,12 +120,12 @@ the complete release (plan + one sidecar per graph + reserved transport parts)
 and requires it to fit GitHub's 1,000-asset limit before any graph upload. The
 same per-graph part allowance is enforced before that graph is uploaded. It
 reserves 4.5 times each compressed source size plus one part, capped by the
-16 GiB logical-archive limit. The current 297-graph plan reserves at most 993
+16 GiB logical-archive limit. The current 296-graph plan reserves at most 990
 release assets.
 
 Continuation does not depend on old Actions reports. Intermediate runs
 paginate the exact draft once and use an uploaded, digest-bearing, plan-bound
-sidecar as that graph's atomic completion marker. Once all 297 markers exist,
+sidecar as that graph's atomic completion marker. Once all 296 markers exist,
 the final preparation run downloads and hashes every canonical sidecar, checks
 every GitHub-reported transport size/SHA-256 and plan-bound label, and
 regenerates all reports from that exact remote state. If an upload is

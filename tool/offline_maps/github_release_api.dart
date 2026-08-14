@@ -513,6 +513,127 @@ class GitHubReleaseClient {
     );
   }
 
+  /// Changes only the name/label metadata of an existing release asset and
+  /// proves that GitHub retained its immutable bytes and upload state.
+  Future<GitHubReleaseAsset> updateAssetMetadata({
+    required GitHubReleaseAsset asset,
+    String? name,
+    String? label,
+  }) async {
+    if (asset.id <= 0) {
+      throw const AutomationException('GitHub asset id is invalid.');
+    }
+    final expectedName = name ?? asset.name;
+    final expectedLabel = label ?? asset.label;
+    if (expectedName.isEmpty || expectedName.length > 255) {
+      throw const AutomationException('GitHub asset name is invalid.');
+    }
+    final response = await _request(
+      'PATCH',
+      Uri.https(
+        'api.github.com',
+        '/repos/$repository/releases/assets/${asset.id}',
+      ),
+      jsonBody: <String, Object?>{
+        'name': expectedName,
+        'label': ?expectedLabel,
+      },
+    );
+    final updated = GitHubReleaseAsset.fromJson(jsonDecode(response.body));
+    if (updated.id != asset.id ||
+        updated.name != expectedName ||
+        updated.label != expectedLabel ||
+        updated.size != asset.size ||
+        updated.digest?.toLowerCase() != asset.digest?.toLowerCase() ||
+        updated.state != asset.state) {
+      throw AutomationException(
+        'GitHub changed immutable metadata while updating ${asset.name}.',
+      );
+    }
+    return updated;
+  }
+
+  /// Fast-forwards one exact lightweight tag. A migration can be resumed
+  /// after an interrupted call because an already-updated tag is accepted.
+  Future<GitHubTagRef> advanceLightweightTag({
+    required String tag,
+    required String previousTarget,
+    required String target,
+  }) async {
+    _validateReleaseTag(tag);
+    if (!RegExp(r'^[a-f0-9]{40}$').hasMatch(previousTarget) ||
+        !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
+        previousTarget == target) {
+      throw const AutomationException(
+        'GitHub tag migration targets are invalid.',
+      );
+    }
+    final current = await tagRef(tag);
+    if (current == null || current.objectType != 'commit') {
+      throw AutomationException(
+        'Required lightweight tag refs/tags/$tag is missing or annotated.',
+      );
+    }
+    if (current.objectSha == target) return current;
+    if (current.objectSha != previousTarget) {
+      throw AutomationException(
+        'Lightweight tag $tag does not match either migration target.',
+      );
+    }
+    final response = await _request(
+      'PATCH',
+      Uri.https('api.github.com', '/repos/$repository/git/refs/tags/$tag'),
+      jsonBody: <String, Object?>{'sha': target, 'force': false},
+    );
+    final updated = GitHubTagRef.fromJson(jsonDecode(response.body));
+    _validateLightweightTag(updated, tag: tag, target: target);
+    return updated;
+  }
+
+  /// Retargets a still-draft release while explicitly retaining its tag name.
+  /// Supplying both fields avoids GitHub replacing a draft's tag with an
+  /// `untagged-*` placeholder when only `target_commitish` is patched.
+  Future<GitHubRelease> retargetDraft({
+    required GitHubRelease release,
+    required String previousTarget,
+    required String target,
+  }) async {
+    if (!release.draft ||
+        release.prerelease ||
+        !RegExp(r'^[a-f0-9]{40}$').hasMatch(previousTarget) ||
+        !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
+        previousTarget == target) {
+      throw const AutomationException(
+        'GitHub draft migration identity is invalid.',
+      );
+    }
+    final currentTarget = release.targetCommitish.toLowerCase();
+    if (currentTarget == target) return release;
+    if (currentTarget != previousTarget) {
+      throw AutomationException(
+        'Draft ${release.tagName} does not match either migration target.',
+      );
+    }
+    final updated = await _patchRelease(release.id, <String, Object?>{
+      'tag_name': release.tagName,
+      'target_commitish': target,
+      'draft': true,
+      'prerelease': false,
+      'make_latest': 'false',
+    });
+    if (updated.id != release.id ||
+        updated.tagName != release.tagName ||
+        updated.targetCommitish.toLowerCase() != target ||
+        !updated.draft ||
+        updated.prerelease) {
+      throw AutomationException(
+        'GitHub did not retain the coordinated identity of '
+        '${release.tagName}.',
+      );
+    }
+    return updated;
+  }
+
   Future<GitHubRelease> publishNotLatest(int releaseId) => _patchRelease(
     releaseId,
     <String, Object?>{'draft': false, 'make_latest': 'false'},

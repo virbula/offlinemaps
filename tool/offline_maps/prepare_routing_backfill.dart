@@ -889,10 +889,19 @@ Future<void> _ensureRoutingPlanAsset(
   }
 
   var assets = await github.listAssets(releaseId);
+  final superseded = assets
+      .where((asset) => isSupersededRoutingBindingAssetName(asset.name))
+      .toList(growable: false);
+  validateSupersededRoutingBindingAssets(
+    assets: superseded,
+    currentPlanSha256: sha256,
+  );
   if (assets.map((asset) => asset.name).toSet().length != assets.length ||
       assets.any(
         (asset) =>
-            asset.name != routingPlanAssetName && !allowedGraphName(asset.name),
+            asset.name != routingPlanAssetName &&
+            !allowedGraphName(asset.name) &&
+            !isSupersededRoutingBindingAssetName(asset.name),
       )) {
     throw const AutomationException(
       'Routing draft contains an unexpected or duplicate asset.',
@@ -932,7 +941,9 @@ Future<void> _ensureRoutingPlanAsset(
     );
   }
   for (final asset in assets.where(
-    (asset) => asset.name != routingPlanAssetName,
+    (asset) =>
+        asset.name != routingPlanAssetName &&
+        !isSupersededRoutingBindingAssetName(asset.name),
   )) {
     final digest = asset.digest;
     if (asset.state != 'uploaded' ||
