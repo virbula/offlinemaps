@@ -16,10 +16,12 @@ const _sourceBytes = 92461415571;
 
 void main() {
   test('atomically reuses the exact superseded source cache', () async {
-    final root = await Directory.systemTemp.createTemp(
+    final temporary = await Directory.systemTemp.createTemp(
       'routing-cache-migration-',
     );
-    addTearDown(() => root.delete(recursive: true));
+    addTearDown(() => temporary.delete(recursive: true));
+    final root = Directory(path.join(temporary.path, 'routing', 'cache'));
+    await root.create(recursive: true);
     final oldDirectory = routingPlanCacheDirectory(root, _oldPlan);
     final sourcesDirectory = Directory(path.join(oldDirectory.path, 'sources'));
     await sourcesDirectory.create(recursive: true);
@@ -95,10 +97,12 @@ void main() {
   test(
     'fails closed when old and corrected cache directories coexist',
     () async {
-      final root = await Directory.systemTemp.createTemp(
+      final temporary = await Directory.systemTemp.createTemp(
         'routing-cache-conflict-',
       );
-      addTearDown(() => root.delete(recursive: true));
+      addTearDown(() => temporary.delete(recursive: true));
+      final root = Directory(path.join(temporary.path, 'routing', 'cache'));
+      await root.create(recursive: true);
       await routingPlanCacheDirectory(root, _oldPlan).create(recursive: true);
       await routingPlanCacheDirectory(root, _newPlan).create(recursive: true);
 
@@ -110,8 +114,12 @@ void main() {
   );
 
   test('replacement runner falls back to a cold verified prefetch', () async {
-    final root = await Directory.systemTemp.createTemp('routing-cache-cold-');
-    addTearDown(() => root.delete(recursive: true));
+    final temporary = await Directory.systemTemp.createTemp(
+      'routing-cache-cold-',
+    );
+    addTearDown(() => temporary.delete(recursive: true));
+    final root = Directory(path.join(temporary.path, 'routing', 'cache'));
+    await root.create(recursive: true);
 
     expect(await migrateCorrectedRoutingCache2026081(cacheRoot: root), isFalse);
     expect(await routingPlanCacheDirectory(root, _oldPlan).exists(), isFalse);
