@@ -436,6 +436,8 @@ jobs:
   continue-validation:
     needs: [prepare, validate-runtime]
     if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
       needs.validate-runtime.result == 'success' &&
       needs.validate-runtime.outputs.pending == 'true' &&
       fromJSON(needs.validate-runtime.outputs.validated_graph_count) >= 1 &&
@@ -535,6 +537,8 @@ jobs:
   cleanup-cache:
     needs: [prepare, finalize]
     if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
       needs.finalize.result == 'success' &&
       needs.prepare.outputs.pending == 'false' &&
       needs.prepare.outputs.dry_run != 'true' &&

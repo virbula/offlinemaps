@@ -457,14 +457,29 @@ void main() {
     final validationJob = RegExp(
       r'\n  validate-runtime:\n([\s\S]*?)\n  continue-validation:',
     ).firstMatch(workflow)?.group(1);
+    final validationContinuationJob = RegExp(
+      r'\n  continue-validation:\n([\s\S]*?)\n  finalize:',
+    ).firstMatch(workflow)?.group(1);
+    final cleanupJob = RegExp(
+      r'\n  cleanup-cache:\n([\s\S]*)$',
+    ).firstMatch(workflow)?.group(1);
     expect(buildJob, isNotNull);
     expect(validationJob, isNotNull);
+    expect(validationContinuationJob, isNotNull);
+    expect(cleanupJob, isNotNull);
     expect(buildJob, contains('permissions:\n      contents: write'));
     expect(validationJob, contains('permissions:\n      contents: write'));
     expect(
       validationJob,
       contains("GitHub's unpublished draft-release API rejects"),
     );
+    expect(validationContinuationJob, contains('always() &&'));
+    expect(
+      validationContinuationJob,
+      contains("needs.prepare.result == 'success'"),
+    );
+    expect(cleanupJob, contains('always() &&'));
+    expect(cleanupJob, contains("needs.prepare.result == 'success'"));
     expect(
       workflow,
       contains('--validation-report build/validation/routing-validation.json'),
