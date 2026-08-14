@@ -460,8 +460,11 @@ void main() {
     expect(buildJob, isNotNull);
     expect(validationJob, isNotNull);
     expect(buildJob, contains('permissions:\n      contents: write'));
-    expect(validationJob, contains('permissions:\n      contents: read'));
-    expect(validationJob, isNot(contains('contents: write')));
+    expect(validationJob, contains('permissions:\n      contents: write'));
+    expect(
+      validationJob,
+      contains("GitHub's unpublished draft-release API rejects"),
+    );
     expect(
       workflow,
       contains('--validation-report build/validation/routing-validation.json'),

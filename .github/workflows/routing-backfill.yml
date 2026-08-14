@@ -360,8 +360,11 @@ jobs:
       github.ref == 'refs/heads/main'
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 1440
+    # GitHub's unpublished draft-release API rejects the Actions integration
+    # under contents:read even for GET requests. The validator itself remains
+    # read-only and its tests forbid release mutations.
     permissions:
-      contents: read
+      contents: write
     outputs:
       pending: ${{ steps.outputs.outputs.pending }}
       completed_graph_count: ${{ steps.outputs.outputs.completed_graph_count }}
