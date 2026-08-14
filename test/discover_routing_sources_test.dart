@@ -360,6 +360,107 @@ void main() {
     }
   });
 
+  test('keeps Heard map-only and selects Vanuatu over unrelated VU extracts', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'routing-reviewed-pacific-discovery-',
+    );
+    addTearDown(() => temporary.delete(recursive: true));
+    final input = File('${temporary.path}/input.json');
+    final output = File('${temporary.path}/output.json');
+    await input.writeAsString(
+      jsonEncode(<String, Object?>{
+        'generatedAt': '2026-08-12T00:00:00Z',
+        'worldwideRegions': <String, Object?>{'version': '2026.08.12'},
+        'routingDataset': <String, Object?>{
+          'enabled': true,
+          'required': true,
+          'provider': 'geofabrik',
+          'minimumRegionCount': 1,
+          'minimumCountryCount': 1,
+          'requiredContinents': <String>['OC'],
+        },
+        'regions': <Object?>[
+          <String, Object?>{
+            'id': 'hm-road',
+            'countryCode': 'HM',
+            'continent': 'OC',
+            'extract': _extract(73.2, -53.2, 73.9, -52.9),
+          },
+          <String, Object?>{
+            'id': 'vu-road',
+            'countryCode': 'VU',
+            'continent': 'OC',
+            'extract': _extract(166.5, -20.3, 169.9, -13.7),
+          },
+        ],
+      }),
+    );
+    final resolved = <Uri>[];
+    final count = await discoverRoutingSources(
+      manifestFile: input,
+      outputManifest: output,
+      cacheDirectory: Directory('${temporary.path}/cache'),
+      indexLoader: () async => <String, Object?>{
+        'type': 'FeatureCollection',
+        'features': <Object?>[
+          _feature(
+            id: 'heard-mcdonald',
+            countries: const <String>['HM'],
+            latest:
+                'https://download.geofabrik.de/australia-oceania/australia/heard-mcdonald-latest.osm.pbf',
+            geometry: _polygon(_box(73.1, -53.3, 74.0, -52.8)),
+          ),
+          _feature(
+            id: 'ile-de-clipperton',
+            countries: const <String>['VU'],
+            latest:
+                'https://download.geofabrik.de/australia-oceania/ile-de-clipperton-latest.osm.pbf',
+            geometry: _polygon(_box(-110.2, 9.5, -108.3, 11.2)),
+          ),
+          _feature(
+            id: 'polynesie-francaise',
+            countries: const <String>['VU'],
+            latest:
+                'https://download.geofabrik.de/australia-oceania/polynesie-francaise-latest.osm.pbf',
+            geometry: _polygon(_box(-155, -28, -134, -7)),
+          ),
+          _feature(
+            id: 'vanuatu',
+            countries: const <String>['VU'],
+            latest:
+                'https://download.geofabrik.de/australia-oceania/vanuatu-latest.osm.pbf',
+            geometry: _polygon(_box(166.4, -20.4, 170.0, -13.6)),
+          ),
+        ],
+      },
+      headResolver: (latest) async {
+        resolved.add(latest);
+        return RoutingRemoteSource(
+          url: Uri.parse(
+            latest.toString().replaceFirst(
+              '-latest.osm.pbf',
+              '-260812.osm.pbf',
+            ),
+          ),
+          exactBytes: 1234,
+        );
+      },
+      checksumResolver: (_) async => 'd' * 32,
+    );
+
+    expect(count, 1);
+    expect(resolved, <Uri>[
+      Uri.parse(
+        'https://download.geofabrik.de/australia-oceania/vanuatu-latest.osm.pbf',
+      ),
+    ]);
+    final dataset =
+        (jsonDecode(await output.readAsString()) as Map)['routingDataset']
+            as Map;
+    expect(dataset['regionGraphs'], <String, Object?>{'vu-road': 'vanuatu'});
+    expect(dataset['regionGraphs'] as Map, isNot(contains('hm-road')));
+  });
+
   test(
     'fails required coverage when a selected source exceeds the cap',
     () async {

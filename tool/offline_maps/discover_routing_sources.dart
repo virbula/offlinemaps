@@ -15,6 +15,10 @@ const Set<String> intentionallyUnsupportedRoutingRegionIds = <String>{
   // Selecting a continent graph for a tiny map would create multi-gigabyte
   // downloads and exceed the reviewed hosted-runner build envelope.
   'gs-road',
+  // The pinned Geofabrik extract for Heard Island and McDonald Islands has
+  // coastline, waterways, and buildings, but no highway or ferry ways. It
+  // cannot produce a Valhalla graph and must remain a map-only region.
+  'hm-road',
   'io-road',
   'pm-road',
   'tf-road',
@@ -444,6 +448,10 @@ Future<_GeofabrikCandidate?> _bestCandidate(
     'eh-road': 'morocco',
     'ne-kas-road': 'northern-zone',
     'sa-road': 'gcc-states',
+    // Geofabrik currently repeats VU on several unrelated Pacific extracts,
+    // including the much smaller Clipperton extract. Select the reviewed
+    // country source explicitly instead of ranking those ISO matches by area.
+    'vu-road': 'vanuatu',
     'xk-kos-road': 'kosovo',
   };
   if (reviewedOverrides[id] case final candidateId?) {
