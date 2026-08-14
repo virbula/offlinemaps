@@ -521,6 +521,54 @@ void main() {
     }
   });
 
+  test('routing workflow preserves false and true pending outputs', () async {
+    final workflow = await File(
+      '.github/workflows/routing-backfill.yml',
+    ).readAsString();
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(r'''pending="$(jq -r '.pending' build/plan/release.json)"'''),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/routing-validation-result.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''pending="$(jq -r '.pending' build/routing-validation-result.json)"''',
+      ),
+    );
+
+    final directory = await Directory.systemTemp.createTemp('pending-output-');
+    addTearDown(() => directory.delete(recursive: true));
+    for (final value in const <bool>[false, true]) {
+      final file = File('${directory.path}/result.json');
+      await file.writeAsString(jsonEncode(<String, Object?>{'pending': value}));
+      final validation = await Process.run('jq', <String>[
+        '-e',
+        '.pending | type == "boolean"',
+        file.path,
+      ]);
+      final output = await Process.run('jq', <String>[
+        '-r',
+        '.pending',
+        file.path,
+      ]);
+      expect(validation.exitCode, 0);
+      expect(output.exitCode, 0);
+      expect((output.stdout as String).trim(), '$value');
+    }
+  });
+
   test(
     'routing workflow validates matrix byte bounds in object context',
     () async {
