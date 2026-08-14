@@ -245,6 +245,114 @@ void main() {
 
     expect(selected.map((graph) => graph.graphId), <String>['graph-two']);
   });
+
+  test('runtime traversal accepts fewer road-statistic rows than tiles', () {
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189, 1189],
+        roadStatisticTileCount: 1111,
+        graphArchiveLoadFailure: false,
+      ),
+      isTrue,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189],
+        roadStatisticTileCount: 1189,
+        graphArchiveLoadFailure: false,
+      ),
+      isTrue,
+    );
+  });
+
+  test('runtime traversal rejects failed or impossible summaries', () {
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 2,
+        reportedArchiveTileCounts: const <int>[1189],
+        roadStatisticTileCount: 1111,
+        graphArchiveLoadFailure: false,
+      ),
+      isFalse,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[0],
+        roadStatisticTileCount: 0,
+        graphArchiveLoadFailure: false,
+      ),
+      isFalse,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189],
+        roadStatisticTileCount: 0,
+        graphArchiveLoadFailure: false,
+      ),
+      isFalse,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189],
+        roadStatisticTileCount: 1190,
+        graphArchiveLoadFailure: false,
+      ),
+      isFalse,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189, 1190],
+        roadStatisticTileCount: 1111,
+        graphArchiveLoadFailure: false,
+      ),
+      isFalse,
+    );
+    expect(
+      routingRuntimeTraversalSucceeded(
+        exitCode: 0,
+        reportedArchiveTileCounts: const <int>[1189],
+        roadStatisticTileCount: 1111,
+        graphArchiveLoadFailure: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test(
+    'runtime traversal distinguishes graph failures from absent traffic',
+    () {
+      expect(
+        routingRuntimeLogLineIndicatesGraphFailure(
+          '\u001b[31;1m[ERROR]\u001b[0m Failed tile 2/123/0',
+        ),
+        isTrue,
+      );
+      expect(
+        routingRuntimeLogLineIndicatesGraphFailure(
+          'Tile extract had 1 corrupt block',
+        ),
+        isTrue,
+      );
+      expect(
+        routingRuntimeLogLineIndicatesGraphFailure(
+          'Tile extract could not be loaded',
+        ),
+        isTrue,
+      );
+      expect(
+        routingRuntimeLogLineIndicatesGraphFailure(
+          'Traffic tile extract could not be loaded',
+        ),
+        isFalse,
+      );
+    },
+  );
 }
 
 RoutingValidationGraph _graph(List<int> bytes, {String? logicalSha256}) {
