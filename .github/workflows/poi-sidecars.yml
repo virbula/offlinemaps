@@ -110,8 +110,18 @@ jobs:
       - name: Generate the pinned region polygons
         run: |
           set -euo pipefail
+          mkdir -p build/poi-inputs
+          # Main retains the immutable routing coverage contract, but the
+          # published catalog intentionally no longer carries the bulky graph
+          # discovery inputs. POI extraction needs only the pinned Natural
+          # Earth geometry, so derive a routing-free generator input without
+          # weakening the generator's fail-closed routing validation.
+          jq --sort-keys 'del(.routingDataset)' config/offline-map-build.json \
+            > build/poi-inputs/region-manifest.json
+          jq -e 'has("routingDataset") | not' \
+            build/poi-inputs/region-manifest.json >/dev/null
           dart run tool/offline_maps/generate_worldwide_regions.dart \
-            --manifest config/offline-map-build.json \
+            --manifest build/poi-inputs/region-manifest.json \
             --output-manifest build/poi-inputs/generated-manifest.json \
             --cache-dir build/poi-inputs/cache
           test "$(jq '.regions | length' build/poi-inputs/generated-manifest.json)" = 554

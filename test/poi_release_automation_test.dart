@@ -75,6 +75,29 @@ void main() {
         RegExp(r'RUNNER_TOOL_CACHE is required').allMatches(workflow),
         hasLength(3),
       );
+      expect(
+        workflow,
+        contains(
+          "jq --sort-keys 'del(.routingDataset)' "
+          'config/offline-map-build.json',
+        ),
+        reason:
+            'POI polygon generation must not weaken the shared generator when '
+            'the synced main manifest intentionally omits routing graphs',
+      );
+      expect(
+        workflow,
+        contains('--manifest build/poi-inputs/region-manifest.json'),
+      );
+      expect(
+        workflow,
+        isNot(
+          contains(
+            '--manifest config/offline-map-build.json \\\n'
+            '            --output-manifest build/poi-inputs/generated-manifest.json',
+          ),
+        ),
+      );
       expect(publishPoi, greaterThan(0));
       expect(sync, greaterThan(publishPoi));
       expect(promoteCatalog, greaterThan(sync));
