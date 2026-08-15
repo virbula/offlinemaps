@@ -7,6 +7,8 @@ does not replace, rename, copy, delete, or mutate `maps-2026.08.1`.
 
 - Good quality: maxzoom 12, release `maps-2026.08.1`.
 - Detailed quality: maxzoom 15, release `maps-z15-2026.08.1`.
+- Detailed country scope: maxzoom 15, release
+  `maps-z15-country-2026.08.1`.
 - Detailed source: `https://build.protomaps.com/20260811.pmtiles`, Protomaps
   4.15.1, 137295889397 bytes, BLAKE3
   `b2aa7f4b1858ec873bd2fb6aff1393ce330ad4d236f2b4f9ad1875e910c1eb8e`.
@@ -16,6 +18,21 @@ does not replace, rename, copy, delete, or mutate `maps-2026.08.1`.
 
 No other z15 tag is valid. In particular, `maps-detailed-2026.08.1` and
 `maps-z12-2026.08.1` are rejected by the pipeline.
+
+## Country archive scope
+
+The country release contains exactly 246 ISO country/territory records. Each
+record is one logical PMTiles archive for the complete country. State and
+province polygons are joined into a GeoJSON FeatureCollection before direct
+extraction from the pinned source; the non-country Siachen polygon is omitted.
+The archive retains minzoom 5 and maxzoom 15 and reuses the 15 MB
+`world-overview-road-2026.08.1.pmtiles` Good archive for zooms 0–5.
+
+The `country` workflow scope runs one country per resumable GitHub-hosted job.
+For large archives, each completed 1,900 MiB part is uploaded and removed from
+runner storage immediately, keeping peak disk near one logical archive plus
+one transport part. The country release is independently audited and
+published non-latest without modifying the regional z15 or Good releases.
 
 ## Transport
 

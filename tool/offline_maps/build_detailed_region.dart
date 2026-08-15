@@ -161,15 +161,16 @@ Future<void> buildDetailedRegion({
         outputDirectory: partsDirectory,
         repository: repository,
         releaseTag: tag,
+        onPart: (file, part) async {
+          await _uploadOrKeepExact(
+            github,
+            releaseId: releaseId,
+            file: file,
+            replaceUnboundConflict: true,
+          );
+          await file.delete();
+        },
       );
-      for (final part in descriptor.parts) {
-        await _uploadOrKeepExact(
-          github,
-          releaseId: releaseId,
-          file: File(path.join(partsDirectory.path, part.file)),
-          replaceUnboundConflict: true,
-        );
-      }
       final descriptorFile = File(
         path.join(partsDirectory.path, descriptorName(fileName)),
       );
@@ -328,6 +329,10 @@ Map<String, Object?> _detailedRecord({
   final fileName = string(region['file'], '$id.file');
   return <String, Object?>{
     'id': id,
+    if (region['name'] != null) 'name': region['name'],
+    if (region['countryCode'] != null) 'countryCode': region['countryCode'],
+    if (object(manifest['quality'], 'quality')['scope'] != null)
+      'scope': object(manifest['quality'], 'quality')['scope'],
     'qualityId': detailedQualityId,
     'file': fileName,
     'version': string(region['version'], 'version'),

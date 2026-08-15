@@ -47,8 +47,8 @@ Future<void> auditDetailedRelease({
   final tag = string(releasePlan['releaseTag'], 'releaseTag');
   final target = string(releasePlan['targetCommitish'], 'targetCommitish');
   final releaseId = integer(releasePlan['releaseId'], 'releaseId');
+  final contract = detailedContractForTag(tag);
   if (repository != 'virbula/offlinemaps' ||
-      tag != detailedReleaseTag ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
       releaseId <= 0) {
     throw const AutomationException('Audit release identity is invalid.');
@@ -58,8 +58,24 @@ Future<void> auditDetailedRelease({
     manifest['regions'],
     'regions',
   ).map((region) => string(region['id'], 'region.id')).toSet();
-  if (regionIds.length != expectedDetailedRegionCount) {
-    throw const AutomationException('Audit requires exactly 553 regions.');
+  if (regionIds.length != contract.expectedRegionCount) {
+    throw AutomationException(
+      'Audit requires exactly ${contract.expectedRegionCount} ${contract.scope} records.',
+    );
+  }
+  if (contract.scope == 'country') {
+    final countryCodes = <String>{};
+    for (final region in objectList(manifest['regions'], 'regions')) {
+      final code = string(region['countryCode'], 'region.countryCode');
+      if (!countryCodes.add(code) ||
+          region['id'] != '${code.toLowerCase()}-road' ||
+          region['minZoom'] != 5 ||
+          region['maxZoom'] != 15) {
+        throw AutomationException(
+          'Country manifest identity is invalid for $code.',
+        );
+      }
+    }
   }
   final states = <Map<String, Object?>>[];
   for (final id in regionIds) {
@@ -70,7 +86,8 @@ Future<void> auditDetailedRelease({
     final state = await readJsonObject(file);
     if (state['id'] != id ||
         state['qualityId'] != detailedQualityId ||
-        state['maxZoom'] != 15) {
+        state['maxZoom'] != 15 ||
+        (contract.scope == 'country' && state['scope'] != 'country')) {
       throw AutomationException('State identity mismatch for $id.');
     }
     states.add(state);
@@ -78,7 +95,7 @@ Future<void> auditDetailedRelease({
   final github = GitHubReleaseClient(repository: repository, token: token);
   try {
     final release = await github.releaseById(releaseId);
-    if (release.tagName != detailedReleaseTag ||
+    if (release.tagName != tag ||
         release.targetCommitish.toLowerCase() != target ||
         !release.draft ||
         release.prerelease) {
@@ -169,7 +186,8 @@ Future<void> auditDetailedRelease({
     );
     await writeJson(recordsFile, <String, Object?>{
       'schemaVersion': 1,
-      'releaseTag': detailedReleaseTag,
+      'releaseTag': tag,
+      'scope': contract.scope,
       'regions': states,
     });
     await writeJson(outputFile, <String, Object?>{
@@ -177,7 +195,8 @@ Future<void> auditDetailedRelease({
       'passed': true,
       'independentAudit': true,
       'releaseId': releaseId,
-      'releaseTag': detailedReleaseTag,
+      'releaseTag': tag,
+      'scope': contract.scope,
       'targetCommitish': target,
       'regionCount': states.length,
       'assetCount': remote.length,
