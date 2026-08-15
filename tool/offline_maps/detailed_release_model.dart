@@ -25,6 +25,12 @@ final RegExp detailedTagPattern = RegExp(
 final RegExp detailedAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,190}\.pmtiles$',
 );
+final RegExp countryAggregateTransportAssetPattern = RegExp(
+  r'^[a-z]{2}-country-road(?:-detailed)?-2026\.08\.1\.pmtiles(?:\.part[0-9]{3}|\.parts\.json)?$',
+);
+
+bool isCountryAggregateTransportAssetName(String name) =>
+    countryAggregateTransportAssetPattern.hasMatch(name);
 
 class DetailedReleaseContract {
   const DetailedReleaseContract({

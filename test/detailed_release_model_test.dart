@@ -70,6 +70,37 @@ void main() {
     );
   });
 
+  test('country aggregate inventory recognizes both quality transports', () {
+    expect(
+      isCountryAggregateTransportAssetName('us-country-road-2026.08.1.pmtiles'),
+      isTrue,
+    );
+    expect(
+      isCountryAggregateTransportAssetName(
+        'us-country-road-detailed-2026.08.1.pmtiles.part003',
+      ),
+      isTrue,
+    );
+    expect(
+      isCountryAggregateTransportAssetName(
+        'us-country-road-detailed-2026.08.1.pmtiles.parts.json',
+      ),
+      isTrue,
+    );
+    expect(
+      isCountryAggregateTransportAssetName(
+        'california-road-detailed-2026.08.1.pmtiles',
+      ),
+      isFalse,
+    );
+    expect(
+      isCountryAggregateTransportAssetName(
+        'us-country-road-detailed-2026.08.1.pmtiles.part3',
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'multipart parts can upload and release runner disk incrementally',
     () async {
