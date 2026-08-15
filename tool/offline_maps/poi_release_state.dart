@@ -5,13 +5,19 @@ import 'release_model.dart';
 class PoiReleaseState {
   const PoiReleaseState({
     required this.completed,
+    required this.emptyMarkers,
     required this.pendingRegionIds,
     required this.transportAssetCount,
+    required this.emptyMarkerAssetCount,
   });
 
   final Map<String, Map<String, Object?>> completed;
+  final Map<String, PoiEmptyMarker> emptyMarkers;
   final Set<String> pendingRegionIds;
   final int transportAssetCount;
+  final int emptyMarkerAssetCount;
+
+  int get completedCandidateCount => completed.length + emptyMarkers.length;
 }
 
 PoiReleaseState inspectPoiReleaseAssets({
@@ -31,11 +37,41 @@ PoiReleaseState inspectPoiReleaseAssets({
       throw AutomationException('POI release repeats asset ${asset.name}.');
     }
   }
-  final transport = assets
+  final candidateAssets = assets
       .where((asset) => !poiMetadataAssetNames.contains(asset.name))
       .toList(growable: false);
+  final emptyMarkerByName =
+      <String, ({PoiPlanRegion region, PoiEmptyMarker marker})>{
+        for (final region in plan.regions)
+          PoiEmptyMarker.forRegion(
+            region: region,
+            planSha256: planSha256,
+          ).assetName: (
+            region: region,
+            marker: PoiEmptyMarker.forRegion(
+              region: region,
+              planSha256: planSha256,
+            ),
+          ),
+      };
+  final emptyAssetByRegion = <String, GitHubReleaseAsset>{};
+  final transport = <GitHubReleaseAsset>[];
   final regionByTransportName = <String, PoiPlanRegion>{};
-  for (final asset in transport) {
+  for (final asset in candidateAssets) {
+    final expectedEmpty = emptyMarkerByName[asset.name];
+    if (expectedEmpty != null) {
+      final marker = expectedEmpty.marker;
+      if (asset.id <= 0 ||
+          asset.state != 'uploaded' ||
+          asset.size != marker.exactBytes ||
+          asset.digest != 'sha256:${marker.sha256}' ||
+          asset.label != marker.label ||
+          emptyAssetByRegion.containsKey(expectedEmpty.region.id)) {
+        throw AutomationException('${asset.name} is an invalid empty marker.');
+      }
+      emptyAssetByRegion[expectedEmpty.region.id] = asset;
+      continue;
+    }
     final matches = plan.regions.where(
       (region) =>
           asset.name == region.file ||
@@ -50,15 +86,30 @@ PoiReleaseState inspectPoiReleaseAssets({
     if (asset.name != region.file && !poiPartPattern.hasMatch(asset.name)) {
       throw AutomationException('${asset.name} is an unsafe POI part.');
     }
+    transport.add(asset);
     regionByTransportName[asset.name] = region;
   }
 
   final complete = <String, Map<String, Object?>>{};
+  final empty = <String, PoiEmptyMarker>{};
   final pending = <String>{};
   for (final region in plan.regions) {
     final group = transport
         .where((asset) => regionByTransportName[asset.name]?.id == region.id)
         .toList(growable: false);
+    final emptyAsset = emptyAssetByRegion[region.id];
+    if (emptyAsset != null) {
+      if (group.isNotEmpty) {
+        throw AutomationException(
+          '${region.id} has both POI transport and an empty marker.',
+        );
+      }
+      empty[region.id] = PoiEmptyMarker.forRegion(
+        region: region,
+        planSha256: planSha256,
+      );
+      continue;
+    }
     if (group.isEmpty) {
       pending.add(region.id);
       continue;
@@ -148,12 +199,14 @@ PoiReleaseState inspectPoiReleaseAssets({
       parts: parts,
     );
   }
-  if (complete.length + pending.length != plan.regions.length) {
+  if (complete.length + empty.length + pending.length != plan.regions.length) {
     throw const AutomationException('POI release state is inconsistent.');
   }
   return PoiReleaseState(
     completed: Map<String, Map<String, Object?>>.unmodifiable(complete),
+    emptyMarkers: Map<String, PoiEmptyMarker>.unmodifiable(empty),
     pendingRegionIds: Set<String>.unmodifiable(pending),
     transportAssetCount: transport.length,
+    emptyMarkerAssetCount: emptyAssetByRegion.length,
   );
 }

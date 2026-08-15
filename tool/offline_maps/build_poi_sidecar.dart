@@ -89,18 +89,28 @@ class PoiSidecarBuildRequest {
   final Directory workDirectory;
 }
 
-class PoiSidecarBuildResult {
+sealed class PoiSidecarBuildOutcome {
+  const PoiSidecarBuildOutcome();
+}
+
+class PoiSidecarBuildResult extends PoiSidecarBuildOutcome {
   const PoiSidecarBuildResult({
     required this.output,
     required this.inspection,
     required this.exactBytes,
     required this.sha256,
-  });
+  }) : super();
 
   final File output;
   final PmtilesArchiveInspection inspection;
   final int exactBytes;
   final String sha256;
+}
+
+class PoiEmptySidecarBuildResult extends PoiSidecarBuildOutcome {
+  const PoiEmptySidecarBuildResult({required this.inspection}) : super();
+
+  final PmtilesArchiveInspection inspection;
 }
 
 List<String> poiExtractArguments(
@@ -137,7 +147,7 @@ List<String> poiFilterArguments(
   input,
 ];
 
-Future<PoiSidecarBuildResult> buildPoiSidecar(
+Future<PoiSidecarBuildOutcome> buildPoiSidecar(
   PoiSidecarBuildRequest request, {
   PoiCommandRunner runner = const SystemPoiCommandRunner(),
 }) async {
@@ -265,13 +275,6 @@ Future<PoiSidecarBuildResult> buildPoiSidecar(
       workingDirectory: work.path,
       description: 'normalize POI bounds and center',
     );
-    await _runChecked(
-      runner,
-      './pmtiles',
-      <String>['verify', request.region.file],
-      workingDirectory: work.path,
-      description: 'verify filtered POI PMTiles',
-    );
     final plain = await _runChecked(
       runner,
       './pmtiles',
@@ -297,6 +300,23 @@ Future<PoiSidecarBuildResult> buildPoiSidecar(
       plainText: plain.stdoutText,
       headerJson: header.stdoutText,
       metadataJson: metadata.stdoutText,
+    );
+    if (inspection.addressedTiles == 0) {
+      validateEmptyPoiPmtilesInspection(
+        inspection,
+        plainText: plain.stdoutText,
+        config: request.config,
+        region: request.region,
+      );
+      succeeded = true;
+      return PoiEmptySidecarBuildResult(inspection: inspection);
+    }
+    await _runChecked(
+      runner,
+      './pmtiles',
+      <String>['verify', request.region.file],
+      workingDirectory: work.path,
+      description: 'verify filtered POI PMTiles',
     );
     validatePoiPmtilesInspection(
       inspection,
@@ -341,6 +361,48 @@ void validatePoiPmtilesInspection(
       'POI archive must be clustered PMTiles v3 z12-z15 gzip MVT.',
     );
   }
+  _validatePoiMetadataAndBounds(inspection, config: config, region: region);
+}
+
+void validateEmptyPoiPmtilesInspection(
+  PmtilesArchiveInspection inspection, {
+  required String plainText,
+  required PoiBuildConfiguration config,
+  required PoiPlanRegion region,
+}) {
+  int count(String label) {
+    final match = RegExp(
+      '^${RegExp.escape(label)}: (\\d+)\\s*\$',
+      multiLine: true,
+    ).firstMatch(plainText);
+    if (match == null) {
+      throw PoiBuildException('Empty POI proof lacks $label.');
+    }
+    return int.parse(match.group(1)!);
+  }
+
+  if (inspection.specVersion != 3 ||
+      inspection.tileType != 'mvt' ||
+      inspection.tileCompression != 'gzip' ||
+      !inspection.clustered ||
+      inspection.addressedTiles != 0 ||
+      count('addressed tiles count') != 0 ||
+      count('tile entries count') != 0 ||
+      count('tile contents count') != 0 ||
+      inspection.minZoom != 255 ||
+      inspection.maxZoom != 0) {
+    throw const PoiBuildException(
+      'Empty POI archive lacks the exact zero-tile PMTiles proof.',
+    );
+  }
+  _validatePoiMetadataAndBounds(inspection, config: config, region: region);
+}
+
+void _validatePoiMetadataAndBounds(
+  PmtilesArchiveInspection inspection, {
+  required PoiBuildConfiguration config,
+  required PoiPlanRegion region,
+}) {
   const epsilon = 0.0000001;
   final actual = inspection.bounds;
   final expected = region.bounds;
@@ -619,7 +681,7 @@ Future<void> main(List<String> arguments) async {
     final region = PoiPlanRegion.fromJson(
       await readJsonObject(File(required('--plan-region'))),
     );
-    final result = await buildPoiSidecar(
+    final outcome = await buildPoiSidecar(
       PoiSidecarBuildRequest(
         config: config,
         region: region,
@@ -628,14 +690,25 @@ Future<void> main(List<String> arguments) async {
         workDirectory: Directory(required('--work-dir')),
       ),
     );
-    stdout.writeln(
-      jsonEncode(<String, Object?>{
-        'file': path.basename(result.output.path),
-        'tileCount': result.inspection.addressedTiles,
-        'exactBytes': result.exactBytes,
-        'sha256': result.sha256,
-      }),
-    );
+    switch (outcome) {
+      case PoiSidecarBuildResult result:
+        stdout.writeln(
+          jsonEncode(<String, Object?>{
+            'file': path.basename(result.output.path),
+            'tileCount': result.inspection.addressedTiles,
+            'exactBytes': result.exactBytes,
+            'sha256': result.sha256,
+          }),
+        );
+      case PoiEmptySidecarBuildResult():
+        stdout.writeln(
+          jsonEncode(<String, Object?>{
+            'file': region.file,
+            'tileCount': 0,
+            'empty': true,
+          }),
+        );
+    }
   } on AutomationException catch (error) {
     stderr.writeln('POI build failed: ${error.message}');
     exitCode = 2;

@@ -33,6 +33,9 @@ final RegExp poiFilePattern = RegExp(
 final RegExp poiPartPattern = RegExp(
   r'^[a-z0-9](?:[a-z0-9._-]{0,220})\.pmtiles\.part\d{3}$',
 );
+final RegExp poiEmptyMarkerPattern = RegExp(
+  r'^[a-z0-9](?:[a-z0-9._-]{0,210})\.pmtiles\.empty\.json$',
+);
 
 class PoiBuildConfiguration {
   const PoiBuildConfiguration({
@@ -709,6 +712,64 @@ class PoiTransportPart {
     'sha256': sha256,
     'downloadUrl': ?downloadUrl,
   };
+}
+
+class PoiEmptyMarker {
+  PoiEmptyMarker._({
+    required this.id,
+    required this.poiFile,
+    required this.assetName,
+    required this.planSha256,
+    required this.contents,
+    required this.exactBytes,
+    required this.sha256,
+    required this.label,
+  });
+
+  factory PoiEmptyMarker.forRegion({
+    required PoiPlanRegion region,
+    required String planSha256,
+  }) {
+    if (!poiSha256Pattern.hasMatch(planSha256)) {
+      throw const AutomationException('POI empty marker plan is invalid.');
+    }
+    final assetName = '${region.file}.empty.json';
+    if (!poiEmptyMarkerPattern.hasMatch(assetName)) {
+      throw const AutomationException('POI empty marker name is invalid.');
+    }
+    final value = <String, Object?>{
+      'schemaVersion': poiSchemaVersion,
+      'mode': 'poi-empty',
+      'poiPlanSha256': planSha256,
+      'id': region.id,
+      'file': region.file,
+      'tileCount': 0,
+      'reason': 'no-poi-tiles',
+    };
+    final contents = canonicalJson(value);
+    return PoiEmptyMarker._(
+      id: region.id,
+      poiFile: region.file,
+      assetName: assetName,
+      planSha256: planSha256,
+      contents: contents,
+      exactBytes: utf8.encode(contents).length,
+      sha256: sha256Text(contents),
+      label: 'easyelevation-poi-empty:$planSha256:${region.id}',
+    );
+  }
+
+  final String id;
+  final String poiFile;
+  final String assetName;
+  final String planSha256;
+  final String contents;
+  final int exactBytes;
+  final String sha256;
+  final String label;
+
+  Map<String, Object?> toJson() =>
+      (jsonDecode(contents) as Map).cast<String, Object?>();
 }
 
 Map<String, Object?> buildPoiDescriptor({
