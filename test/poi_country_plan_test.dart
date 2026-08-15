@@ -24,6 +24,30 @@ void main() {
     expect(builder, contains('!release.draft ||'));
   });
 
+  test('country catalog is complete, direct, and alias-aware', () async {
+    final source = await File(
+      'tool/offline_maps/finalize_country_poi_catalog.dart',
+    ).readAsString();
+    for (final guard in <String>[
+      "const countryCatalogTag = 'country-catalog-2026.08.1'",
+      "const countryCatalogAsset = 'country-poi-catalog.json'",
+      "plan['scopeCount'] != 247",
+      "plan['buildCount'] != 25",
+      "plan['aliasCount'] != 222",
+      "plan['omissionCount'] != 0",
+      "'kind': 'package'",
+      "'kind': 'alias'",
+      "'memberRegionIds': members",
+      "'poi': poi",
+      "'poi': _countryDescriptor",
+      'first.planSha256 != planSha',
+      'entries.length != first.partCount',
+      "'/virbula/offlinemaps/releases/download/poi-2026.08.1/'",
+    ]) {
+      expect(source, contains(guard), reason: guard);
+    }
+  });
+
   test('every regional member has one deterministic country scope', () async {
     final manifest =
         jsonDecode(
