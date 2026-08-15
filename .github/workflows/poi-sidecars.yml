@@ -376,7 +376,8 @@ jobs:
             --result build/poi-validation-result.json \
             --validation-report build/poi-validation.json \
             --maximum-regions 12
-          pending="$(jq -er '.pending | select(type == "boolean")' build/poi-validation-result.json)"
+          jq -e '.pending | type == "boolean"' build/poi-validation-result.json >/dev/null
+          pending="$(jq -r '.pending' build/poi-validation-result.json)"
           completed="$(jq -er '.completedRegionCount | select(type == "number" and . >= 0 and . <= 553)' build/poi-validation-result.json)"
           validated_now="$(jq -er '.validatedRegionCount | select(type == "number" and . >= 0 and . <= 12)' build/poi-validation-result.json)"
           if [[ "$pending" == true ]]; then test "$completed" -lt 553; test "$validated_now" -ge 1; else test "$completed" = 553; fi
