@@ -190,9 +190,7 @@ Future<void> auditDetailedRelease({
       }
     }
     final aggregateRemoteNames = remote
-        .where(
-          (asset) => asset.name.contains('-country-road-2026.08.1.pmtiles'),
-        )
+        .where((asset) => isCountryAggregateTransportAssetName(asset.name))
         .map((asset) => asset.name)
         .toSet();
     if ((appendExisting
