@@ -1,6 +1,8 @@
 name: Build Detailed offline maps z15
 
 on:
+  schedule:
+    - cron: '47 3 11 * *'
   workflow_dispatch:
     inputs:
       target_commit:
@@ -17,6 +19,15 @@ on:
         required: true
         type: boolean
         default: false
+      audit_only:
+        description: Audit an existing completed build without running build shards
+        required: true
+        type: boolean
+        default: false
+      state_run_id:
+        description: Prior workflow run id containing all state artifacts (audit-only)
+        required: false
+        type: string
 
 concurrency:
   group: offlinemaps-z15-2026-08-1
@@ -111,7 +122,7 @@ jobs:
 
   build:
     needs: prepare
-    if: inputs.dry_run != true
+    if: inputs.dry_run != true && inputs.audit_only != true
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -176,13 +187,15 @@ jobs:
 
   independent-audit:
     needs: [prepare, build]
-    if: inputs.dry_run != true
+    if: always() && inputs.dry_run != true && (inputs.audit_only == true || needs.build.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
-      contents: read
+      actions: read
+      contents: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      STATE_RUN_ID: ${{ inputs.audit_only == true && inputs.state_run_id || github.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -197,9 +210,11 @@ jobs:
           path: build/z15-plan
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: detailed-state-${{ github.run_id }}-*
+          pattern: detailed-state-${{ env.STATE_RUN_ID }}-*
           path: build/z15-state
           merge-multiple: true
+          run-id: ${{ env.STATE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Independently audit exact draft inventory
         run: |
           set -euo pipefail
@@ -219,7 +234,7 @@ jobs:
 
   publish-non-latest:
     needs: [prepare, build, independent-audit]
-    if: inputs.dry_run != true && inputs.publish_after_audit == true
+    if: inputs.dry_run != true && inputs.audit_only != true && inputs.publish_after_audit == true
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
