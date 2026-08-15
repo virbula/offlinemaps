@@ -403,7 +403,13 @@ void _validatePoiMetadataAndBounds(
   required PoiBuildConfiguration config,
   required PoiPlanRegion region,
 }) {
-  const epsilon = 0.0000001;
+  // PMTiles v3 stores header coordinates as signed integers in 1e-7 degree
+  // units. Converting an intended decimal coordinate through binary floating
+  // point can therefore land one encoded unit below the plan value (for
+  // example 0.297461 becomes 0.2974609). Accept exactly that storage quantum,
+  // plus a tiny margin for the subtraction itself, while rejecting the next
+  // representable PMTiles coordinate.
+  const epsilon = 0.00000010000001;
   final actual = inspection.bounds;
   final expected = region.bounds;
   if ((actual.west - expected.west).abs() > epsilon ||

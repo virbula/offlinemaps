@@ -421,6 +421,72 @@ clustered: true
     );
   });
 
+  test('bounds allow one PMTiles coordinate unit but reject two', () {
+    const plannedBounds = PmtilesBounds(
+      west: 123.074745,
+      south: 0.297461,
+      east: 126.921094,
+      north: 4.5479,
+    );
+    final plannedRegion = PoiPlanRegion(
+      id: 'id-sa-road',
+      mapFile: 'id-sa-road-2026.08.1.pmtiles',
+      file: 'id-sa-poi-2026.08.1.pmtiles',
+      bounds: plannedBounds,
+      geoJsonFile: 'id-sa-road.geojson',
+      geoJsonExactBytes: 1,
+      geoJsonSha256: 'a' * 64,
+    );
+    PmtilesArchiveInspection inspection(double south) =>
+        PmtilesArchiveInspection(
+          specVersion: 3,
+          tileType: 'mvt',
+          tileCompression: 'gzip',
+          minZoom: 12,
+          maxZoom: 15,
+          bounds: PmtilesBounds(
+            west: plannedBounds.west,
+            south: south,
+            east: plannedBounds.east,
+            north: plannedBounds.north,
+          ),
+          addressedTiles: 3529,
+          clustered: true,
+          metadata: <String, Object?>{
+            'format': 'pbf',
+            'type': 'overlay',
+            'generator': 'tile-join v2.77.0',
+            'vector_layers': <Map<String, Object?>>[
+              <String, Object?>{
+                'id': 'pois',
+                'minzoom': 12,
+                'maxzoom': 15,
+                'fields': <String, String>{
+                  'kind': 'String',
+                  'kind_detail': 'String',
+                  'min_zoom': 'Number',
+                  'name': 'String',
+                },
+              },
+            ],
+          },
+        );
+
+    validatePoiPmtilesInspection(
+      inspection(0.2974609),
+      config: config,
+      region: plannedRegion,
+    );
+    expect(
+      () => validatePoiPmtilesInspection(
+        inspection(0.2974608),
+        config: config,
+        region: plannedRegion,
+      ),
+      throwsA(isA<PoiBuildException>()),
+    );
+  });
+
   test(
     'empty filtering emits no PMTiles and never runs invalid verify',
     () async {
