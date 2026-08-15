@@ -33,6 +33,11 @@ audit requires exactly 553 completed regional records, no duplicate names, no
 unplanned assets, deterministic part sizes, exact reassembled sizes, and no
 more than 1,000 release assets.
 
+Processing runs as size-bounded three-region shards on four GitHub-hosted
+Ubuntu runners. Each shard publishes its completed state even after failure;
+reruns also recover exact completed monoliths or descriptor-bound multipart
+archives directly from the draft release.
+
 ## Catalog and app integration are deferred
 
 This program does not modify, replace, or promote the current catalog and does
