@@ -28,6 +28,8 @@ class PoiReconciliationOptions {
     required this.expectedPlanSha256,
     required this.expectedPoiAssetCount,
     required this.expectedPoiAssetBytes,
+    required this.expectedCatalogAssetCount,
+    required this.expectedCatalogAssetBytes,
     required this.token,
     required this.dryRun,
   });
@@ -64,6 +66,12 @@ class PoiReconciliationOptions {
     final planSha = required('--expected-plan-sha256').toLowerCase();
     final assetCount = int.tryParse(required('--expected-poi-asset-count'));
     final assetBytes = int.tryParse(required('--expected-poi-asset-bytes'));
+    final catalogAssetCount = int.tryParse(
+      required('--expected-catalog-asset-count'),
+    );
+    final catalogAssetBytes = int.tryParse(
+      required('--expected-catalog-asset-bytes'),
+    );
     if (values.isNotEmpty ||
         !RegExp(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$').hasMatch(repository) ||
         !RegExp(r'^[a-f0-9]{40}$').hasMatch(oldTarget) ||
@@ -78,7 +86,12 @@ class PoiReconciliationOptions {
         assetCount == null ||
         assetCount < 1 ||
         assetBytes == null ||
-        assetBytes < 1) {
+        assetBytes < 1 ||
+        catalogAssetCount == null ||
+        catalogAssetCount < 0 ||
+        catalogAssetBytes == null ||
+        catalogAssetBytes < 0 ||
+        ((catalogAssetCount == 0) != (catalogAssetBytes == 0))) {
       throw const AutomationException('Reconciliation identity is invalid.');
     }
     final token = Platform.environment['GITHUB_TOKEN'];
@@ -95,6 +108,8 @@ class PoiReconciliationOptions {
       expectedPlanSha256: planSha,
       expectedPoiAssetCount: assetCount,
       expectedPoiAssetBytes: assetBytes,
+      expectedCatalogAssetCount: catalogAssetCount,
+      expectedCatalogAssetBytes: catalogAssetBytes,
       token: token,
       dryRun: dryRun,
     );
@@ -109,6 +124,8 @@ class PoiReconciliationOptions {
   final String expectedPlanSha256;
   final int expectedPoiAssetCount;
   final int expectedPoiAssetBytes;
+  final int expectedCatalogAssetCount;
+  final int expectedCatalogAssetBytes;
   final String token;
   final bool dryRun;
 }
@@ -229,12 +246,19 @@ Future<void> _validateRemoteState(
   draft(catalog, options.catalogReleaseId, _catalogTag);
   final poiAssets = await github.listAssets(options.poiReleaseId);
   final catalogAssets = await github.listAssets(options.catalogReleaseId);
-  if (catalogAssets.isNotEmpty ||
-      poiAssets.length != options.expectedPoiAssetCount ||
+  if (poiAssets.length != options.expectedPoiAssetCount ||
       poiAssets.fold<int>(0, (sum, asset) => sum + asset.size) !=
           options.expectedPoiAssetBytes ||
+      catalogAssets.length != options.expectedCatalogAssetCount ||
+      catalogAssets.fold<int>(0, (sum, asset) => sum + asset.size) !=
+          options.expectedCatalogAssetBytes ||
       poiAssets.map((asset) => asset.name).toSet().length != poiAssets.length ||
+      catalogAssets.map((asset) => asset.name).toSet().length !=
+          catalogAssets.length ||
       poiAssets.any(
+        (asset) => asset.state != 'uploaded' || asset.digest == null,
+      ) ||
+      catalogAssets.any(
         (asset) => asset.state != 'uploaded' || asset.digest == null,
       )) {
     throw const AutomationException('Coordinated draft inventory drifted.');

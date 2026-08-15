@@ -34,12 +34,18 @@ void main() {
       '14',
       '--expected-poi-asset-bytes',
       '115790957',
+      '--expected-catalog-asset-count',
+      '5',
+      '--expected-catalog-asset-bytes',
+      '5260301',
       '--dry-run',
     ]);
     expect(options.dryRun, isTrue);
     expect(options.poiReleaseId, 370949216);
     expect(options.expectedPoiAssetCount, 14);
     expect(options.expectedPoiAssetBytes, 115790957);
+    expect(options.expectedCatalogAssetCount, 5);
+    expect(options.expectedCatalogAssetBytes, 5260301);
   });
 
   test('reconciliation rejects equal OLD and NEW targets', () {
@@ -63,6 +69,10 @@ void main() {
         '14',
         '--expected-poi-asset-bytes',
         '115790957',
+        '--expected-catalog-asset-count',
+        '0',
+        '--expected-catalog-asset-bytes',
+        '0',
       ]),
       throwsA(isA<AutomationException>()),
     );
