@@ -1,0 +1,252 @@
+name: Build Detailed offline maps z15
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: Full reviewed 40-character commit SHA; blank uses workflow SHA
+        required: false
+        type: string
+      dry_run:
+        description: Generate and validate the exact plan without creating a draft
+        required: true
+        type: boolean
+        default: true
+      publish_after_audit:
+        description: Publish z15 as non-latest after the independent audit passes
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: offlinemaps-z15-2026-08-1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DART_VERSION: '3.12.2'
+  DETAILED_TAG: maps-z15-2026.08.1
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - run: dart analyze
+      - name: Run z15 and transport regression tests
+        run: |
+          dart test \
+            test/detailed_release_model_test.dart \
+            test/build_region_tool_test.dart \
+            test/github_release_api_retry_test.dart
+      - name: Enforce isolated release identities
+        run: |
+          set -euo pipefail
+          test "$(git grep -l 'maps-z15-2026\.08\.1' -- 'tool/offline_maps/*detailed*' 'docs/detailed-maps.md' | wc -l)" -gt 0
+          ! git grep -q 'maps-detailed-2026\.08\.1' -- 'tool/offline_maps/*.dart'
+          ! git grep -q 'maps-z12-2026\.08\.1' -- 'tool/offline_maps/*.dart'
+          git diff --exit-code -- catalog.json config/offline-map-build.json
+
+  prepare:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_TARGET: ${{ inputs.target_commit }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - name: Prepare exact 553-region plan
+        run: |
+          set -euo pipefail
+          target="${INPUT_TARGET:-$GITHUB_SHA}"
+          [[ "$target" =~ ^[a-f0-9]{40}$ ]]
+          extra=()
+          if [[ "$DRY_RUN" == "true" ]]; then extra+=(--dry-run); fi
+          dart run tool/offline_maps/prepare_detailed_release.dart \
+            --base-config config/offline-map-build.json \
+            --output-dir build/z15-plan \
+            --cache-dir build/z15-cache \
+            --repository "$GITHUB_REPOSITORY" \
+            --target "$target" \
+            --tag "$DETAILED_TAG" \
+            "${extra[@]}"
+          test "$(jq '.regions | length' build/z15-plan/manifest.json)" = 553
+          test "$(jq '[.regions[] | select(.minZoom != 5 or .maxZoom != 15)] | length' build/z15-plan/manifest.json)" = 0
+      - name: Create three-region recovery shards
+        id: matrix
+        run: |
+          set -euo pipefail
+          jq -c '.regions | map(.id) as $ids | {include: [range(0; $ids|length; 3) as $i | {shard:(($i / 3) | floor | tostring), regionIds:$ids[$i:$i+3]}]}' \
+            build/z15-plan/manifest.json > build/z15-plan/matrix.json
+          matrix="$(cat build/z15-plan/matrix.json)"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: detailed-plan-${{ github.run_id }}
+          path: build/z15-plan/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+  build:
+    needs: prepare
+    if: inputs.dry_run != true
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REGION_IDS_JSON: ${{ toJSON(matrix.regionIds) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: detailed-plan-${{ github.run_id }}
+          path: build/z15-plan
+      - name: Report runner health
+        run: |
+          set -euo pipefail
+          df -h .
+          uptime
+          test "$(df -Pk . | awk 'NR==2 {print $4}')" -gt 20971520
+      - name: Build, validate, and resumably upload shard
+        run: |
+          set -euo pipefail
+          mkdir -p build/z15-state build/z15-work
+          count="$(jq 'length' <<< "$REGION_IDS_JSON")"
+          for ((index=0; index<count; index++)); do
+            id="$(jq -r ".[${index}]" <<< "$REGION_IDS_JSON")"
+            echo "::notice::Starting Detailed region $id ($((index + 1))/$count in shard ${{ matrix.shard }})"
+            df -h .
+            dart run tool/offline_maps/build_detailed_region.dart \
+              --manifest build/z15-plan/manifest.json \
+              --release build/z15-plan/release.json \
+              --region-id "$id" \
+              --work-dir build/z15-work \
+              --state-dir build/z15-state \
+              --pmtiles-command build/tools/pmtiles
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: detailed-state-${{ github.run_id }}-${{ matrix.shard }}
+          path: build/z15-state/*.json
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+          overwrite: true
+
+  independent-audit:
+    needs: [prepare, build]
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: detailed-plan-${{ github.run_id }}
+          path: build/z15-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: detailed-state-${{ github.run_id }}-*
+          path: build/z15-state
+          merge-multiple: true
+      - name: Independently audit exact draft inventory
+        run: |
+          set -euo pipefail
+          test "$(find build/z15-state -name '*.json' | wc -l)" = 553
+          dart run tool/offline_maps/audit_detailed_release.dart \
+            --manifest build/z15-plan/manifest.json \
+            --release build/z15-plan/release.json \
+            --state-dir build/z15-state \
+            --output build/z15-audit/detailed-audit.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: detailed-independent-audit-${{ github.run_id }}
+          path: build/z15-audit/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+  publish-non-latest:
+    needs: [prepare, build, independent-audit]
+    if: inputs.dry_run != true && inputs.publish_after_audit == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: detailed-plan-${{ github.run_id }}
+          path: build/z15-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: detailed-state-${{ github.run_id }}-*
+          path: build/z15-state
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: detailed-independent-audit-${{ github.run_id }}
+          path: build/reviewed-audit
+      - name: Re-audit, publish non-latest, and verify public assets
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/publish_detailed_release.dart \
+            --manifest build/z15-plan/manifest.json \
+            --release build/z15-plan/release.json \
+            --state-dir build/z15-state \
+            --reviewed-audit build/reviewed-audit/detailed-audit.json \
+            --output-dir build/z15-publication
