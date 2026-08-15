@@ -2,7 +2,9 @@ name: Build Detailed offline maps z15
 
 on:
   schedule:
-    - cron: '47 3 11 * *'
+    # Follow the Good-map source refresh twice yearly. The immutable z15
+    # release is published independently; catalog promotion is coordinated.
+    - cron: '47 3 11 1,7 *'
   workflow_dispatch:
     inputs:
       target_commit:
