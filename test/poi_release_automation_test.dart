@@ -293,6 +293,21 @@ void main() {
       );
       expect(poiWorkflow, contains('minimum_seconds=\$((90 * 24 * 60 * 60))'));
       expect(
+        poiWorkflow,
+        contains(
+          '"\$tag" == catalog-2026.08.1 &&\n'
+          '                "\$base_tag" == catalog-2026.08.1 &&\n'
+          '                "\$next_tag" == catalog-2026.08.2',
+        ),
+      );
+      expect(
+        poiWorkflow,
+        contains(
+          'age_seconds < minimum_seconds )) && '
+          '[[ "\$same_cycle_completion" != true ]]',
+        ),
+      );
+      expect(
         poiWorkflow.indexOf(
           'Enforce minimum quarterly catalog publication cadence',
         ),
