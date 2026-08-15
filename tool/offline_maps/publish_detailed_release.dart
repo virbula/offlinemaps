@@ -100,14 +100,14 @@ Future<void> publishDetailedRelease({
   final provenance = File(path.join(outputDirectory.path, 'provenance.json'));
   await writeJson(provenance, <String, Object?>{
     'schemaVersion': 1,
-    'qualityId': detailedQualityId,
+    'qualityId': contract.qualityId,
     'releaseTag': tag,
     'scope': contract.scope,
     'source': manifest['source'],
     'builder': manifest['builder'],
     'regionCount': contract.expectedRegionCount,
     'minZoom': 5,
-    'maxZoom': 15,
+    'maxZoom': contract.maxZoom,
     'worldOverview': <String, Object?>{
       'included': false,
       'retainedReleaseTag': 'maps-2026.08.1',

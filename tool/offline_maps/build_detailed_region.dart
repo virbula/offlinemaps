@@ -55,6 +55,7 @@ Future<void> buildDetailedRegion({
   final tag = string(release['releaseTag'], 'release.releaseTag');
   final target = string(release['targetCommitish'], 'release.targetCommitish');
   final releaseId = integer(release['releaseId'], 'release.releaseId');
+  final contract = detailedContractForTag(tag);
   if (repository != 'virbula/offlinemaps' ||
       !detailedTagPattern.hasMatch(tag) ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
@@ -69,8 +70,8 @@ Future<void> buildDetailedRegion({
     throw AutomationException('Unknown region $regionId.');
   }
   final region = matches.single;
-  if (region['maxZoom'] != 15 || region['minZoom'] != 5) {
-    throw AutomationException('$regionId is not z5-z15.');
+  if (region['maxZoom'] != contract.maxZoom || region['minZoom'] != 5) {
+    throw AutomationException('$regionId has the wrong zoom contract.');
   }
   await workDirectory.create(recursive: true);
   await stateDirectory.create(recursive: true);
@@ -120,7 +121,7 @@ Future<void> buildDetailedRegion({
         north: number(boundsJson['north'], 'north'),
       ),
       minZoom: 5,
-      maxZoom: 15,
+      maxZoom: contract.maxZoom,
       tilesetVersion: string(
         object(manifest['source'], 'source')['tilesetVersion'],
         'tilesetVersion',
@@ -337,12 +338,12 @@ Map<String, Object?> _detailedRecord({
     if (region['group'] != null) 'group': region['group'],
     if (object(manifest['quality'], 'quality')['scope'] != null)
       'scope': object(manifest['quality'], 'quality')['scope'],
-    'qualityId': detailedQualityId,
+    'qualityId': object(manifest['quality'], 'quality')['id'],
     'file': fileName,
     'version': string(region['version'], 'version'),
     'bounds': object(region['extract'], 'extract')['bounds'],
     'minZoom': 5,
-    'maxZoom': 15,
+    'maxZoom': object(manifest['quality'], 'quality')['maxZoom'],
     'archiveFormat': 'pmtiles',
     'format': 'mvt',
     'tileCompression': tileCompression,

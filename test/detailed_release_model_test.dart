@@ -46,17 +46,20 @@ void main() {
     expect(transportAssetCount([githubTransportAssetLimitBytes]), 7);
   });
 
-  test('only approved immutable z15 transport tags are accepted', () {
+  test('only approved immutable map transport tags are accepted', () {
     expect(detailedTagPattern.hasMatch('maps-z15-2026.08.1'), isTrue);
     expect(detailedTagPattern.hasMatch('maps-z15-country-2026.08.1'), isTrue);
+    expect(detailedTagPattern.hasMatch('maps-z12-country-2026.08.1'), isTrue);
     expect(detailedTagPattern.hasMatch('maps-detailed-2026.08.1'), isFalse);
     expect(detailedTagPattern.hasMatch('maps-z15-2026.08.2'), isFalse);
     expect(detailedTagPattern.hasMatch('maps-2026.08.1'), isFalse);
     expect(
       detailedContractForTag(detailedCountryReleaseTag).expectedRegionCount,
-      expectedDetailedCountryCount,
+      expectedCountryAggregateCount,
     );
     expect(detailedContractForTag(detailedCountryReleaseTag).scope, 'country');
+    expect(detailedContractForTag(goodCountryReleaseTag).qualityId, 'good');
+    expect(detailedContractForTag(goodCountryReleaseTag).maxZoom, 12);
   });
 
   test(

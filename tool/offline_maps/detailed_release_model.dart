@@ -10,13 +10,17 @@ const int detailedPartBytes = 1900 * 1024 * 1024;
 const int githubTransportAssetLimitBytes = 2 * 1024 * 1024 * 1024;
 const int githubReleaseAssetCountLimit = 1000;
 const int expectedDetailedRegionCount = 553;
-const int expectedDetailedCountryCount = 246;
+const int expectedCountryCodeCount = 246;
+const int expectedCountryAggregateCount = 25;
+const int expectedAggregateSourceRegionCount = 331;
 const String detailedQualityId = 'detailed';
+const String goodQualityId = 'good';
 
 const String detailedReleaseTag = 'maps-z15-2026.08.1';
 const String detailedCountryReleaseTag = 'maps-z15-country-2026.08.1';
+const String goodCountryReleaseTag = 'maps-z12-country-2026.08.1';
 final RegExp detailedTagPattern = RegExp(
-  r'^maps-z15(?:-country)?-2026\.08\.1$',
+  r'^maps-(?:z15(?:-country)?|z12-country)-2026\.08\.1$',
 );
 final RegExp detailedAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,190}\.pmtiles$',
@@ -27,11 +31,15 @@ class DetailedReleaseContract {
     required this.tag,
     required this.expectedRegionCount,
     required this.scope,
+    required this.qualityId,
+    required this.maxZoom,
   });
 
   final String tag;
   final int expectedRegionCount;
   final String scope;
+  final String qualityId;
+  final int maxZoom;
 }
 
 DetailedReleaseContract detailedContractForTag(String tag) {
@@ -40,15 +48,31 @@ DetailedReleaseContract detailedContractForTag(String tag) {
       tag: detailedReleaseTag,
       expectedRegionCount: expectedDetailedRegionCount,
       scope: 'region',
+      qualityId: detailedQualityId,
+      maxZoom: 15,
     ),
     detailedCountryReleaseTag => const DetailedReleaseContract(
       tag: detailedCountryReleaseTag,
-      expectedRegionCount: expectedDetailedCountryCount,
+      expectedRegionCount: expectedCountryAggregateCount,
       scope: 'country',
+      qualityId: detailedQualityId,
+      maxZoom: 15,
+    ),
+    goodCountryReleaseTag => const DetailedReleaseContract(
+      tag: goodCountryReleaseTag,
+      expectedRegionCount: expectedCountryAggregateCount,
+      scope: 'country',
+      qualityId: goodQualityId,
+      maxZoom: 12,
     ),
     _ => throw AutomationException('Unknown Detailed release tag $tag.'),
   };
 }
+
+String countryArchiveFile(String id, DetailedReleaseContract contract) =>
+    contract.qualityId == detailedQualityId
+    ? '$id-detailed-2026.08.1.pmtiles'
+    : '$id-2026.08.1.pmtiles';
 
 class DetailedTransportPart {
   const DetailedTransportPart({
