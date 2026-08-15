@@ -63,6 +63,17 @@ void main() {
       final promoteCatalog = workflow.indexOf('--promote-catalog');
       expect(workflow, contains('{ref:"poi-2026.08.1"'));
       expect(workflow, isNot(contains('{ref:"main"')));
+      expect(
+        workflow,
+        contains(r'test "$REF" = refs/heads/codex/poi-sidecars'),
+      );
+      expect(workflow, isNot(contains('refs/heads/main')));
+      expect(
+        RegExp(
+          r"github\.ref == 'refs/heads/codex/poi-sidecars'",
+        ).allMatches(workflow),
+        hasLength(6),
+      );
       expect(workflow, contains(r'test "$target" = "$TARGET"'));
       expect(
         workflow,
@@ -75,6 +86,15 @@ void main() {
         RegExp(r'RUNNER_TOOL_CACHE is required').allMatches(workflow),
         hasLength(3),
       );
+      expect(
+        RegExp(r'PMTILES="\$POI_TOOL_CACHE/pmtiles"').allMatches(workflow),
+        hasLength(2),
+        reason:
+            'the pinned PMTiles zip expands to the literal basename pmtiles',
+      );
+      expect(workflow, contains(r'TILE_JOIN="$POI_TOOL_CACHE/tile-join"'));
+      expect(workflow, isNot(contains(r'$POI_TOOL_CACHE/pmtiles-1.30.1')));
+      expect(workflow, isNot(contains(r'$POI_TOOL_CACHE/tile-join-2.77.0')));
       expect(
         workflow,
         contains(
