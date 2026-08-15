@@ -6,6 +6,24 @@ import 'package:test/test.dart';
 import '../tool/offline_maps/prepare_country_poi_plan.dart';
 
 void main() {
+  test('country builder is plan-bound, resumable, and asset-bounded', () async {
+    final builder = await File(
+      'tool/offline_maps/build_country_poi_release.dart',
+    ).readAsString();
+    expect(builder, contains("plan['scopeCount'] != 247"));
+    expect(builder, contains("plan['buildCount'] != 25"));
+    expect(builder, contains("plan['aliasCount'] != 222"));
+    expect(builder, contains("plans.single.digest != 'sha256:\$planSha'"));
+    expect(builder, contains('config.transport.maximumReleaseAssets'));
+    expect(builder, contains('splitPoiArchiveForTransport'));
+    expect(builder, contains('poiAssetLabel('));
+    expect(
+      builder,
+      contains('release.targetCommitish.toLowerCase() != target'),
+    );
+    expect(builder, contains('!release.draft ||'));
+  });
+
   test('every regional member has one deterministic country scope', () async {
     final manifest =
         jsonDecode(

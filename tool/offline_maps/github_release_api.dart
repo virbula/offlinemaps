@@ -771,7 +771,7 @@ class GitHubReleaseClient {
 
 void _validateReleaseTag(String tag) {
   if (!RegExp(
-    r'^(routing|catalog|poi)-[0-9]{4}\.[0-9]{2}\.[0-9]{1,2}$',
+    r'^(routing|catalog|poi|poi-country|country-catalog)-[0-9]{4}\.[0-9]{2}\.[0-9]{1,2}$',
   ).hasMatch(tag)) {
     throw const AutomationException('GitHub release tag is invalid.');
   }

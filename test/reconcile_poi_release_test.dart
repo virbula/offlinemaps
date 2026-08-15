@@ -77,4 +77,41 @@ void main() {
       throwsA(isA<AutomationException>()),
     );
   });
+
+  test('country reconciliation selects dedicated immutable identities', () {
+    if ((Platform.environment['GITHUB_TOKEN'] ?? '').isEmpty) return;
+    final options = PoiReconciliationOptions.parse(<String>[
+      '--country',
+      '--repository',
+      'virbula/offlinemaps',
+      '--old-target',
+      oldTarget,
+      '--new-target',
+      newTarget,
+      '--poi-release-id',
+      '371111512',
+      '--catalog-release-id',
+      '371111516',
+      '--plan',
+      'country-poi-plan.json',
+      '--expected-plan-sha256',
+      planSha,
+      '--expected-poi-asset-count',
+      '1',
+      '--expected-poi-asset-bytes',
+      '51585',
+      '--expected-catalog-asset-count',
+      '0',
+      '--expected-catalog-asset-bytes',
+      '0',
+    ]);
+    expect(options.country, isTrue);
+    expect(options.poiTag, 'poi-country-2026.08.1');
+    expect(options.catalogTag, 'country-catalog-2026.08.1');
+    expect(options.planAsset, 'country-poi-plan.json');
+    final githubClient = File(
+      'tool/offline_maps/github_release_api.dart',
+    ).readAsStringSync();
+    expect(githubClient, contains('poi-country|country-catalog'));
+  });
 }

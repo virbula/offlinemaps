@@ -7,6 +7,9 @@ import 'release_model.dart';
 const _branch = 'codex/poi-sidecars';
 const _poiTag = 'poi-2026.08.1';
 const _catalogTag = 'catalog-2026.08.2';
+const _countryPoiTag = 'poi-country-2026.08.1';
+const _countryCatalogTag = 'country-catalog-2026.08.1';
+const _countryPlanAsset = 'country-poi-plan.json';
 
 Future<void> main(List<String> arguments) async {
   try {
@@ -32,15 +35,21 @@ class PoiReconciliationOptions {
     required this.expectedCatalogAssetBytes,
     required this.token,
     required this.dryRun,
+    required this.country,
   });
 
   factory PoiReconciliationOptions.parse(List<String> arguments) {
     final values = <String, String>{};
     var dryRun = false;
+    var country = false;
     for (var i = 0; i < arguments.length; i++) {
       final argument = arguments[i];
       if (argument == '--dry-run') {
         dryRun = true;
+        continue;
+      }
+      if (argument == '--country') {
+        country = true;
         continue;
       }
       if (!argument.startsWith('--') || i + 1 == arguments.length) {
@@ -112,6 +121,7 @@ class PoiReconciliationOptions {
       expectedCatalogAssetBytes: catalogAssetBytes,
       token: token,
       dryRun: dryRun,
+      country: country,
     );
   }
 
@@ -128,6 +138,11 @@ class PoiReconciliationOptions {
   final int expectedCatalogAssetBytes;
   final String token;
   final bool dryRun;
+  final bool country;
+
+  String get poiTag => country ? _countryPoiTag : _poiTag;
+  String get catalogTag => country ? _countryCatalogTag : _catalogTag;
+  String get planAsset => country ? _countryPlanAsset : poiPlanAssetName;
 }
 
 Future<void> reconcilePoiRelease(PoiReconciliationOptions options) async {
@@ -184,7 +199,7 @@ Future<void> reconcilePoiRelease(PoiReconciliationOptions options) async {
     await _requireNoActiveRuns(options.repository);
 
     await github.advanceLightweightTag(
-      tag: _catalogTag,
+      tag: options.catalogTag,
       previousTarget: options.oldTarget,
       target: options.newTarget,
     );
@@ -199,7 +214,7 @@ Future<void> reconcilePoiRelease(PoiReconciliationOptions options) async {
       target: options.newTarget,
     );
     await github.advanceLightweightTag(
-      tag: _poiTag,
+      tag: options.poiTag,
       previousTarget: options.oldTarget,
       target: options.newTarget,
     );
@@ -242,8 +257,8 @@ Future<void> _validateRemoteState(
     }
   }
 
-  draft(poi, options.poiReleaseId, _poiTag);
-  draft(catalog, options.catalogReleaseId, _catalogTag);
+  draft(poi, options.poiReleaseId, options.poiTag);
+  draft(catalog, options.catalogReleaseId, options.catalogTag);
   final poiAssets = await github.listAssets(options.poiReleaseId);
   final catalogAssets = await github.listAssets(options.catalogReleaseId);
   if (poiAssets.length != options.expectedPoiAssetCount ||
@@ -264,13 +279,13 @@ Future<void> _validateRemoteState(
     throw const AutomationException('Coordinated draft inventory drifted.');
   }
   final plans = poiAssets
-      .where((asset) => asset.name == poiPlanAssetName)
+      .where((asset) => asset.name == options.planAsset)
       .toList();
   if (plans.length != 1 ||
       plans.single.digest != 'sha256:${options.expectedPlanSha256}') {
     throw const AutomationException('Remote immutable POI plan drifted.');
   }
-  for (final tag in <String>[_catalogTag, _poiTag]) {
+  for (final tag in <String>[options.catalogTag, options.poiTag]) {
     final ref = await github.tagRef(tag);
     final target = ref?.objectSha;
     if (ref == null ||
