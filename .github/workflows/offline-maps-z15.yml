@@ -234,13 +234,14 @@ jobs:
 
   publish-non-latest:
     needs: [prepare, build, independent-audit]
-    if: inputs.dry_run != true && inputs.audit_only != true && inputs.publish_after_audit == true
+    if: always() && inputs.dry_run != true && inputs.publish_after_audit == true && needs.independent-audit.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
       contents: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      STATE_RUN_ID: ${{ inputs.audit_only == true && inputs.state_run_id || github.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -255,9 +256,11 @@ jobs:
           path: build/z15-plan
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: detailed-state-${{ github.run_id }}-*
+          pattern: detailed-state-${{ env.STATE_RUN_ID }}-*
           path: build/z15-state
           merge-multiple: true
+          run-id: ${{ env.STATE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: detailed-independent-audit-${{ github.run_id }}
