@@ -1,4 +1,5 @@
 name: Build Detailed offline maps z15
+run-name: ${{ inputs.scope == 'country-z12' && 'Build Good offline road maps z12 — country aggregates' || inputs.scope == 'country-z15' && 'Build Detailed offline road maps z15 — country aggregates' || 'Build Detailed offline road maps z15 — regional inventory' }}
 
 on:
   schedule:
