@@ -54,10 +54,12 @@ Future<void> auditDetailedRelease({
     throw const AutomationException('Audit release identity is invalid.');
   }
   _validateProvenance(manifest);
-  final regionIds = objectList(
-    manifest['regions'],
-    'regions',
-  ).map((region) => string(region['id'], 'region.id')).toSet();
+  final manifestRegions = objectList(manifest['regions'], 'regions');
+  final manifestById = <String, Map<String, Object?>>{
+    for (final region in manifestRegions)
+      string(region['id'], 'region.id'): region,
+  };
+  final regionIds = manifestById.keys.toSet();
   if (regionIds.length != contract.expectedRegionCount) {
     throw AutomationException(
       'Audit requires exactly ${contract.expectedRegionCount} ${contract.scope} records.',
@@ -90,7 +92,17 @@ Future<void> auditDetailedRelease({
         (contract.scope == 'country' && state['scope'] != 'country')) {
       throw AutomationException('State identity mismatch for $id.');
     }
-    states.add(state);
+    final region = manifestById[id]!;
+    states.add(<String, Object?>{
+      ...state,
+      if (region['name'] != null) 'name': region['name'],
+      if (region['continent'] != null) 'continent': region['continent'],
+      if (region['countryCode'] != null) 'countryCode': region['countryCode'],
+      if (region['subdivisionCode'] != null)
+        'subdivisionCode': region['subdivisionCode'],
+      if (region['group'] != null) 'group': region['group'],
+      'scope': contract.scope,
+    });
   }
   final github = GitHubReleaseClient(repository: repository, token: token);
   try {

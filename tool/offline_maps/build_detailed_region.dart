@@ -330,7 +330,11 @@ Map<String, Object?> _detailedRecord({
   return <String, Object?>{
     'id': id,
     if (region['name'] != null) 'name': region['name'],
+    if (region['continent'] != null) 'continent': region['continent'],
     if (region['countryCode'] != null) 'countryCode': region['countryCode'],
+    if (region['subdivisionCode'] != null)
+      'subdivisionCode': region['subdivisionCode'],
+    if (region['group'] != null) 'group': region['group'],
     if (object(manifest['quality'], 'quality')['scope'] != null)
       'scope': object(manifest['quality'], 'quality')['scope'],
     'qualityId': detailedQualityId,
