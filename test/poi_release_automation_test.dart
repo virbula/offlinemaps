@@ -64,6 +64,17 @@ void main() {
       expect(workflow, contains('{ref:"poi-2026.08.1"'));
       expect(workflow, isNot(contains('{ref:"main"')));
       expect(workflow, contains(r'test "$target" = "$TARGET"'));
+      expect(
+        workflow,
+        isNot(contains(r'${{ runner.tool_cache }}')),
+        reason:
+            'runner context is unavailable in job-level env and makes the '
+            'workflow undispatchable',
+      );
+      expect(
+        RegExp(r'RUNNER_TOOL_CACHE is required').allMatches(workflow),
+        hasLength(3),
+      );
       expect(publishPoi, greaterThan(0));
       expect(sync, greaterThan(publishPoi));
       expect(promoteCatalog, greaterThan(sync));

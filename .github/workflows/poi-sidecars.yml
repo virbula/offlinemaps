@@ -207,12 +207,18 @@ jobs:
       SHARD: ${{ fromJSON(needs.prepare.outputs.matrix).include[0].shard }}
       REGION_IDS_JSON: ${{ toJSON(fromJSON(needs.prepare.outputs.matrix).include[0].regionIds) }}
       PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
-      POI_TOOL_CACHE: ${{ runner.tool_cache }}/../easyelevation-poi-tools
-      POI_BUILD_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Configure runner-local POI caches
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
+          printf 'POI_TOOL_CACHE=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-tools" >> "$GITHUB_ENV"
+          printf 'POI_BUILD_CACHE_ROOT=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-build" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}
@@ -320,12 +326,18 @@ jobs:
       validated_region_count: ${{ steps.outputs.outputs.validated_region_count }}
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      POI_TOOL_CACHE: ${{ runner.tool_cache }}/../easyelevation-poi-tools
-      POI_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-validation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Configure runner-local POI caches
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
+          printf 'POI_TOOL_CACHE=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-tools" >> "$GITHUB_ENV"
+          printf 'POI_VALIDATION_STATE_ROOT=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-validation" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}
@@ -497,12 +509,18 @@ jobs:
     timeout-minutes: 30
     env:
       PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
-      POI_BUILD_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-build
-      POI_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-validation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Configure runner-local POI caches
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
+          printf 'POI_BUILD_CACHE_ROOT=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-build" >> "$GITHUB_ENV"
+          printf 'POI_VALIDATION_STATE_ROOT=%s\n' \
+            "$RUNNER_TOOL_CACHE/../easyelevation-poi-validation" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}
