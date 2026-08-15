@@ -53,8 +53,11 @@ Future<void> publishDetailedRelease({
   }
   final reviewed = await readJsonObject(reviewedAuditFile);
   final releasePlan = await readJsonObject(releaseFile);
+  final manifest = await readJsonObject(manifestFile);
   final tag = string(releasePlan['releaseTag'], 'releaseTag');
-  final contract = detailedContractForTag(tag);
+  final contract = object(manifest['quality'], 'quality')['scope'] == 'country'
+      ? countryAggregateContractForReleaseTag(tag)
+      : detailedContractForTag(tag);
   if (reviewed['passed'] != true ||
       reviewed['independentAudit'] != true ||
       reviewed['releaseTag'] != tag ||
@@ -96,7 +99,6 @@ Future<void> publishDetailedRelease({
   }
   final audit = File(path.join(outputDirectory.path, 'detailed-audit.json'));
   await reviewedAuditFile.copy(audit.path);
-  final manifest = await readJsonObject(manifestFile);
   final provenance = File(path.join(outputDirectory.path, 'provenance.json'));
   await writeJson(provenance, <String, Object?>{
     'schemaVersion': 1,

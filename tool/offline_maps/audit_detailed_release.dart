@@ -47,7 +47,10 @@ Future<void> auditDetailedRelease({
   final tag = string(releasePlan['releaseTag'], 'releaseTag');
   final target = string(releasePlan['targetCommitish'], 'targetCommitish');
   final releaseId = integer(releasePlan['releaseId'], 'releaseId');
-  final contract = detailedContractForTag(tag);
+  final contract = object(manifest['quality'], 'quality')['scope'] == 'country'
+      ? countryAggregateContractForReleaseTag(tag)
+      : detailedContractForTag(tag);
+  final appendExisting = releasePlan['appendExisting'] == true;
   if (repository != 'virbula/offlinemaps' ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
       releaseId <= 0) {
@@ -70,7 +73,7 @@ Future<void> auditDetailedRelease({
     for (final region in objectList(manifest['regions'], 'regions')) {
       final code = string(region['countryCode'], 'region.countryCode');
       if (!countryCodes.add(code) ||
-          region['id'] != '${code.toLowerCase()}-road' ||
+          region['id'] != '${code.toLowerCase()}-country-road' ||
           region['minZoom'] != 5 ||
           region['maxZoom'] != contract.maxZoom) {
         throw AutomationException(
@@ -109,10 +112,10 @@ Future<void> auditDetailedRelease({
     final release = await github.releaseById(releaseId);
     if (release.tagName != tag ||
         release.targetCommitish.toLowerCase() != target ||
-        !release.draft ||
+        release.draft == appendExisting ||
         release.prerelease) {
       throw const AutomationException(
-        'Audit target must be the exact Detailed draft.',
+        'Audit target is not the exact map release.',
       );
     }
     final remote = await github.listAssets(releaseId);
@@ -186,10 +189,19 @@ Future<void> auditDetailedRelease({
         throw AutomationException('$id has an unknown transport.');
       }
     }
-    if (remote.length != expectedNames.length ||
+    final aggregateRemoteNames = remote
+        .where(
+          (asset) => asset.name.contains('-country-road-2026.08.1.pmtiles'),
+        )
+        .map((asset) => asset.name)
+        .toSet();
+    if ((appendExisting
+            ? aggregateRemoteNames.length != expectedNames.length ||
+                  !aggregateRemoteNames.containsAll(expectedNames)
+            : remote.length != expectedNames.length) ||
         remote.length > githubReleaseAssetCountLimit) {
       throw AutomationException(
-        'Exact inventory mismatch: expected ${expectedNames.length}, found ${remote.length}.',
+        'Exact aggregate inventory mismatch: expected ${expectedNames.length}.',
       );
     }
     states.sort((left, right) => '${left['id']}'.compareTo('${right['id']}'));
@@ -211,7 +223,7 @@ Future<void> auditDetailedRelease({
       'scope': contract.scope,
       'targetCommitish': target,
       'regionCount': states.length,
-      'assetCount': remote.length,
+      'assetCount': appendExisting ? expectedNames.length : remote.length,
       'totalArchiveBytes': totalArchiveBytes,
       'recordsSha256': await fileSha256(recordsFile),
       'auditedAt': DateTime.now().toUtc().toIso8601String(),

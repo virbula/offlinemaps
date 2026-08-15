@@ -27,7 +27,7 @@ Future<void> main(List<String> arguments) async {
 Future<void> validateDetailedCountryPlan(File manifestFile) async {
   final manifest = await readJsonObject(manifestFile);
   final tag = string(manifest['releaseTag'], 'releaseTag');
-  final contract = detailedContractForTag(tag);
+  final contract = countryAggregateContractForReleaseTag(tag);
   if (contract.scope != 'country') {
     throw const AutomationException('Country release tag is not exact.');
   }
@@ -53,7 +53,7 @@ Future<void> validateDetailedCountryPlan(File manifestFile) async {
     if (!RegExp(r'^[A-Z]{2}$').hasMatch(code) ||
         !codes.add(code) ||
         !ids.add(id) ||
-        id != '${code.toLowerCase()}-road' ||
+        id != '${code.toLowerCase()}-country-road' ||
         region['file'] != countryArchiveFile(id, contract) ||
         region['minZoom'] != 5 ||
         region['maxZoom'] != contract.maxZoom ||

@@ -20,7 +20,7 @@ const String detailedReleaseTag = 'maps-z15-2026.08.1';
 const String detailedCountryReleaseTag = 'maps-z15-country-2026.08.1';
 const String goodCountryReleaseTag = 'maps-z12-country-2026.08.1';
 final RegExp detailedTagPattern = RegExp(
-  r'^maps-(?:z15(?:-country)?|z12-country)-2026\.08\.1$',
+  r'^maps-(?:2026\.08\.1|z15(?:-country)?-2026\.08\.1|z12-country-2026\.08\.1)$',
 );
 final RegExp detailedAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,190}\.pmtiles$',
@@ -40,6 +40,26 @@ class DetailedReleaseContract {
   final String scope;
   final String qualityId;
   final int maxZoom;
+}
+
+DetailedReleaseContract countryAggregateContractForReleaseTag(String tag) {
+  return switch (tag) {
+    detailedReleaseTag => const DetailedReleaseContract(
+      tag: detailedReleaseTag,
+      expectedRegionCount: expectedCountryAggregateCount,
+      scope: 'country',
+      qualityId: detailedQualityId,
+      maxZoom: 15,
+    ),
+    'maps-2026.08.1' => const DetailedReleaseContract(
+      tag: 'maps-2026.08.1',
+      expectedRegionCount: expectedCountryAggregateCount,
+      scope: 'country',
+      qualityId: goodQualityId,
+      maxZoom: 12,
+    ),
+    _ => throw AutomationException('Unknown aggregate target tag $tag.'),
+  };
 }
 
 DetailedReleaseContract detailedContractForTag(String tag) {
