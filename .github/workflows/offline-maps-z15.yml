@@ -41,7 +41,7 @@ on:
         type: string
 
 concurrency:
-  group: offlinemaps-z15-2026-08-1
+  group: offlinemaps-${{ inputs.scope || 'regional' }}-2026-08-1
   cancel-in-progress: false
 
 permissions:
@@ -49,9 +49,10 @@ permissions:
 
 env:
   DART_VERSION: '3.12.2'
-  DETAILED_TAG: ${{ inputs.scope == 'country-z12' && 'maps-z12-country-2026.08.1' || inputs.scope == 'country-z15' && 'maps-z15-country-2026.08.1' || 'maps-z15-2026.08.1' }}
+  DETAILED_TAG: ${{ inputs.scope == 'country-z12' && 'maps-2026.08.1' || 'maps-z15-2026.08.1' }}
   EXPECTED_DETAILED_COUNT: ${{ startsWith(inputs.scope, 'country-') && '25' || '553' }}
   EXPECTED_MAX_ZOOM: ${{ inputs.scope == 'country-z12' && '12' || '15' }}
+  EXPECTED_RELEASE_ID: ${{ inputs.scope == 'country-z12' && '368947035' || inputs.scope == 'country-z15' && '370929449' || '' }}
 
 jobs:
   check:
@@ -124,6 +125,10 @@ jobs:
           if [[ "${{ inputs.scope }}" == country-* ]]; then
             dart run tool/offline_maps/validate_detailed_country_plan.dart \
               --manifest build/z15-plan/manifest.json
+            test "$(jq -r '.releaseId' build/z15-plan/release.json)" = "$EXPECTED_RELEASE_ID"
+            test "$(jq -r '.releaseTag' build/z15-plan/release.json)" = "$DETAILED_TAG"
+            test "$(jq -r '.appendExisting' build/z15-plan/release.json)" = "true"
+            test "$(jq -r '.draft' build/z15-plan/release.json)" = "false"
           fi
       - name: Create bounded recovery shards
         id: matrix

@@ -52,7 +52,7 @@ void main() {
     expect(detailedTagPattern.hasMatch('maps-z12-country-2026.08.1'), isTrue);
     expect(detailedTagPattern.hasMatch('maps-detailed-2026.08.1'), isFalse);
     expect(detailedTagPattern.hasMatch('maps-z15-2026.08.2'), isFalse);
-    expect(detailedTagPattern.hasMatch('maps-2026.08.1'), isFalse);
+    expect(detailedTagPattern.hasMatch('maps-2026.08.1'), isTrue);
     expect(
       detailedContractForTag(detailedCountryReleaseTag).expectedRegionCount,
       expectedCountryAggregateCount,
@@ -60,6 +60,14 @@ void main() {
     expect(detailedContractForTag(detailedCountryReleaseTag).scope, 'country');
     expect(detailedContractForTag(goodCountryReleaseTag).qualityId, 'good');
     expect(detailedContractForTag(goodCountryReleaseTag).maxZoom, 12);
+    expect(
+      countryAggregateContractForReleaseTag('maps-2026.08.1').qualityId,
+      'good',
+    );
+    expect(
+      countryAggregateContractForReleaseTag(detailedReleaseTag).maxZoom,
+      15,
+    );
   });
 
   test(

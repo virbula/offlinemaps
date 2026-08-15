@@ -55,16 +55,13 @@ Future<void> prepareDetailedCountryRelease({
 }) async {
   if (repository != 'virbula/offlinemaps' ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
-      !<String>{
-        detailedCountryReleaseTag,
-        goodCountryReleaseTag,
-      }.contains(tag)) {
+      !<String>{detailedReleaseTag, 'maps-2026.08.1'}.contains(tag)) {
     throw const AutomationException(
       'Detailed country release identity is invalid.',
     );
   }
   final config = await readJsonObject(baseConfig);
-  final contract = detailedContractForTag(tag);
+  final contract = countryAggregateContractForReleaseTag(tag);
   _validatePinnedSource(config);
   final worldwide = object(config['worldwideRegions'], 'worldwideRegions');
   if (worldwide['minZoom'] != 5 || worldwide['overviewMaxZoom'] != 5) {
@@ -127,7 +124,7 @@ Future<void> prepareDetailedCountryRelease({
           'left.id',
         ).compareTo(string(right['id'], 'right.id')),
       );
-    final id = '${code.toLowerCase()}-road';
+    final id = '${code.toLowerCase()}-country-road';
     final features = <Object?>[];
     var west = double.infinity;
     var south = double.infinity;
@@ -198,32 +195,25 @@ Future<void> prepareDetailedCountryRelease({
     manifest,
   );
   var releaseId = 0;
-  if (!dryRun) {
-    final token = Platform.environment['GITHUB_TOKEN'];
-    if (token == null || token.isEmpty) {
-      throw const AutomationException('GITHUB_TOKEN is required.');
-    }
+  var releaseTarget = '';
+  final token = Platform.environment['GITHUB_TOKEN'];
+  if (!dryRun && (token == null || token.isEmpty)) {
+    throw const AutomationException('GITHUB_TOKEN is required.');
+  }
+  if (token != null && token.isNotEmpty) {
     final github = GitHubReleaseClient(repository: repository, token: token);
     try {
       final existing = await github.releaseByTag(tag);
-      final release =
-          existing ??
-          await github.createDraft(
-            tag: tag,
-            target: target,
-            title:
-                'EasyElevation ${contract.qualityId == detailedQualityId ? 'Detailed' : 'Good'} country road maps $tag',
-            body:
-                'Missing whole-country road-map aggregates for the 25 split country inventories at maxzoom ${contract.maxZoom}. Large archives use deterministic 1,900 MiB multipart transport. Existing regional releases remain unchanged during staging.',
-          );
-      if (!release.draft ||
-          release.prerelease ||
-          release.targetCommitish.toLowerCase() != target) {
+      if (existing == null ||
+          existing.draft ||
+          existing.prerelease ||
+          existing.tagName != tag) {
         throw const AutomationException(
-          'Detailed country release must remain the exact draft.',
+          'Aggregate target must be the exact published map release.',
         );
       }
-      releaseId = release.id;
+      releaseId = existing.id;
+      releaseTarget = existing.targetCommitish.toLowerCase();
     } finally {
       github.close();
     }
@@ -234,9 +224,11 @@ Future<void> prepareDetailedCountryRelease({
       'schemaVersion': 1,
       'repository': repository,
       'releaseTag': tag,
-      'targetCommitish': target,
+      'targetCommitish': releaseTarget.isEmpty ? target : releaseTarget,
+      'workflowCommit': target,
       'releaseId': releaseId,
-      'draft': true,
+      'draft': false,
+      'appendExisting': true,
       'publishLatest': false,
       'scope': 'country',
       'regionCount': countries.length,

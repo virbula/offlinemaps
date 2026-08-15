@@ -55,7 +55,10 @@ Future<void> buildDetailedRegion({
   final tag = string(release['releaseTag'], 'release.releaseTag');
   final target = string(release['targetCommitish'], 'release.targetCommitish');
   final releaseId = integer(release['releaseId'], 'release.releaseId');
-  final contract = detailedContractForTag(tag);
+  final contract = object(manifest['quality'], 'quality')['scope'] == 'country'
+      ? countryAggregateContractForReleaseTag(tag)
+      : detailedContractForTag(tag);
+  final appendExisting = release['appendExisting'] == true;
   if (repository != 'virbula/offlinemaps' ||
       !detailedTagPattern.hasMatch(tag) ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
@@ -82,6 +85,7 @@ Future<void> buildDetailedRegion({
       await github.releaseById(releaseId),
       tag: tag,
       target: target,
+      appendExisting: appendExisting,
     );
     if (await stateFile.exists()) {
       final state = await readJsonObject(stateFile);
@@ -470,13 +474,14 @@ void _validateDetailedDraft(
   GitHubRelease release, {
   required String tag,
   required String target,
+  required bool appendExisting,
 }) {
   if (release.tagName != tag ||
       release.targetCommitish.toLowerCase() != target ||
-      !release.draft ||
+      release.draft == appendExisting ||
       release.prerelease) {
     throw const AutomationException(
-      'Detailed release is no longer the reviewed draft.',
+      'Map release is no longer the exact reviewed append target.',
     );
   }
 }
