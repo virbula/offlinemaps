@@ -14,7 +14,8 @@ on:
         default: regional
         options:
           - regional
-          - country
+          - country-z15
+          - country-z12
       target_commit:
         description: Full reviewed 40-character commit SHA; blank uses workflow SHA
         required: false
@@ -48,8 +49,9 @@ permissions:
 
 env:
   DART_VERSION: '3.12.2'
-  DETAILED_TAG: ${{ inputs.scope == 'country' && 'maps-z15-country-2026.08.1' || 'maps-z15-2026.08.1' }}
-  EXPECTED_DETAILED_COUNT: ${{ inputs.scope == 'country' && '246' || '553' }}
+  DETAILED_TAG: ${{ inputs.scope == 'country-z12' && 'maps-z12-country-2026.08.1' || inputs.scope == 'country-z15' && 'maps-z15-country-2026.08.1' || 'maps-z15-2026.08.1' }}
+  EXPECTED_DETAILED_COUNT: ${{ startsWith(inputs.scope, 'country-') && '25' || '553' }}
+  EXPECTED_MAX_ZOOM: ${{ inputs.scope == 'country-z12' && '12' || '15' }}
 
 jobs:
   check:
@@ -106,7 +108,7 @@ jobs:
           extra=()
           if [[ "$DRY_RUN" == "true" ]]; then extra+=(--dry-run); fi
           prepare_tool=tool/offline_maps/prepare_detailed_release.dart
-          if [[ "${{ inputs.scope }}" == country ]]; then
+          if [[ "${{ inputs.scope }}" == country-* ]]; then
             prepare_tool=tool/offline_maps/prepare_detailed_country_release.dart
           fi
           dart run "$prepare_tool" \
@@ -118,8 +120,8 @@ jobs:
             --tag "$DETAILED_TAG" \
             "${extra[@]}"
           test "$(jq '.regions | length' build/z15-plan/manifest.json)" = "$EXPECTED_DETAILED_COUNT"
-          test "$(jq '[.regions[] | select(.minZoom != 5 or .maxZoom != 15)] | length' build/z15-plan/manifest.json)" = 0
-          if [[ "${{ inputs.scope }}" == country ]]; then
+          test "$(jq --argjson max "$EXPECTED_MAX_ZOOM" '[.regions[] | select(.minZoom != 5 or .maxZoom != $max)] | length' build/z15-plan/manifest.json)" = 0
+          if [[ "${{ inputs.scope }}" == country-* ]]; then
             dart run tool/offline_maps/validate_detailed_country_plan.dart \
               --manifest build/z15-plan/manifest.json
           fi
@@ -128,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           stride=3
-          if [[ "${{ inputs.scope }}" == country ]]; then stride=1; fi
+          if [[ "${{ inputs.scope }}" == country-* ]]; then stride=1; fi
           jq -c --argjson stride "$stride" '.regions | map(.id) as $ids | {include: [range(0; $ids|length; $stride) as $i | {shard:(($i / $stride) | floor | tostring), regionIds:$ids[$i:$i+$stride]}]}' \
             build/z15-plan/manifest.json > build/z15-plan/matrix.json
           matrix="$(cat build/z15-plan/matrix.json)"

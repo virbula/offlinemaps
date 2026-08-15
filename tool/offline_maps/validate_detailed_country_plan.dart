@@ -26,20 +26,22 @@ Future<void> main(List<String> arguments) async {
 
 Future<void> validateDetailedCountryPlan(File manifestFile) async {
   final manifest = await readJsonObject(manifestFile);
-  if (manifest['releaseTag'] != detailedCountryReleaseTag) {
+  final tag = string(manifest['releaseTag'], 'releaseTag');
+  final contract = detailedContractForTag(tag);
+  if (contract.scope != 'country') {
     throw const AutomationException('Country release tag is not exact.');
   }
   final quality = object(manifest['quality'], 'quality');
-  if (quality['id'] != detailedQualityId ||
+  if (quality['id'] != contract.qualityId ||
       quality['scope'] != 'country' ||
       quality['minZoom'] != 5 ||
-      quality['maxZoom'] != 15 ||
+      quality['maxZoom'] != contract.maxZoom ||
       quality['worldOverviewQualityId'] != 'good' ||
       quality['worldOverviewReleaseTag'] != 'maps-2026.08.1') {
     throw const AutomationException('Country quality contract is invalid.');
   }
   final regions = objectList(manifest['regions'], 'regions');
-  if (regions.length != expectedDetailedCountryCount) {
+  if (regions.length != expectedCountryAggregateCount) {
     throw const AutomationException('Country count is not exact.');
   }
   final codes = <String>{};
@@ -52,9 +54,9 @@ Future<void> validateDetailedCountryPlan(File manifestFile) async {
         !codes.add(code) ||
         !ids.add(id) ||
         id != '${code.toLowerCase()}-road' ||
-        region['file'] != '$id-detailed-2026.08.1.pmtiles' ||
+        region['file'] != countryArchiveFile(id, contract) ||
         region['minZoom'] != 5 ||
-        region['maxZoom'] != 15 ||
+        region['maxZoom'] != contract.maxZoom ||
         region['group'] != 'countries' ||
         region.containsKey('subdivisionCode')) {
       throw AutomationException('Country identity is invalid for $id.');
@@ -86,11 +88,9 @@ Future<void> validateDetailedCountryPlan(File manifestFile) async {
     }
     sourceFeatureCount += features.length;
   }
-  // The established regional plan contains 553 z15 records. One is the
-  // non-country Siachen polygon; the remaining 552 must join exactly once.
-  if (sourceFeatureCount != expectedDetailedRegionCount - 1) {
+  if (sourceFeatureCount != expectedAggregateSourceRegionCount) {
     throw AutomationException(
-      'Country unions cover $sourceFeatureCount source features, expected ${expectedDetailedRegionCount - 1}.',
+      'Country unions cover $sourceFeatureCount source features, expected $expectedAggregateSourceRegionCount.',
     );
   }
 }

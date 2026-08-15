@@ -21,14 +21,17 @@ No other z15 tag is valid. In particular, `maps-detailed-2026.08.1` and
 
 ## Country archive scope
 
-The country release contains exactly 246 ISO country/territory records. Each
-record is one logical PMTiles archive for the complete country. State and
-province polygons are joined into a GeoJSON FeatureCollection before direct
-extraction from the pinned source; the non-country Siachen polygon is omitted.
+The country staging releases contain exactly 25 aggregate records: only the
+country codes whose established inventory is split across multiple regional
+files. State and province polygons are joined into a GeoJSON FeatureCollection
+before direct extraction from the pinned source. The final country index covers
+all 246 ISO country/territory codes by referencing the 221 existing nationwide
+assets and these 25 new aggregates; the non-country Siachen polygon is omitted.
 The archive retains minzoom 5 and maxzoom 15 and reuses the 15 MB
 `world-overview-road-2026.08.1.pmtiles` Good archive for zooms 0–5.
 
-The `country` workflow scope runs one country per resumable GitHub-hosted job.
+The `country-z12` and `country-z15` workflow scopes run one aggregate per
+resumable GitHub-hosted job.
 For large archives, each completed 1,900 MiB part is uploaded and removed from
 runner storage immediately, keeping peak disk near one logical archive plus
 one transport part. The country release is independently audited and

@@ -55,18 +55,22 @@ Future<void> prepareDetailedCountryRelease({
 }) async {
   if (repository != 'virbula/offlinemaps' ||
       !RegExp(r'^[a-f0-9]{40}$').hasMatch(target) ||
-      tag != detailedCountryReleaseTag) {
+      !<String>{
+        detailedCountryReleaseTag,
+        goodCountryReleaseTag,
+      }.contains(tag)) {
     throw const AutomationException(
       'Detailed country release identity is invalid.',
     );
   }
   final config = await readJsonObject(baseConfig);
+  final contract = detailedContractForTag(tag);
   _validatePinnedSource(config);
   final worldwide = object(config['worldwideRegions'], 'worldwideRegions');
   if (worldwide['minZoom'] != 5 || worldwide['overviewMaxZoom'] != 5) {
     throw const AutomationException('Pinned worldwide zoom contract changed.');
   }
-  worldwide['maxZoom'] = 15;
+  worldwide['maxZoom'] = contract.maxZoom;
   final routing = object(config['routingDataset'], 'routingDataset');
   routing['enabled'] = false;
   routing['required'] = false;
@@ -94,9 +98,9 @@ Future<void> prepareDetailedCountryRelease({
     }
     byCountry.putIfAbsent(code, () => <Map<String, Object?>>[]).add(region);
   }
-  if (byCountry.length != expectedDetailedCountryCount) {
+  if (byCountry.length != expectedCountryCodeCount) {
     throw AutomationException(
-      'Expected $expectedDetailedCountryCount country codes, found ${byCountry.length}.',
+      'Expected $expectedCountryCodeCount country codes, found ${byCountry.length}.',
     );
   }
   final countryDirectory = Directory(
@@ -104,7 +108,18 @@ Future<void> prepareDetailedCountryRelease({
   );
   await countryDirectory.create(recursive: true);
   final countries = <Map<String, Object?>>[];
-  for (final code in byCountry.keys.toList()..sort()) {
+  final aggregateCodes =
+      byCountry.entries
+          .where((entry) => entry.value.length > 1)
+          .map((entry) => entry.key)
+          .toList()
+        ..sort();
+  if (aggregateCodes.length != expectedCountryAggregateCount) {
+    throw AutomationException(
+      'Expected $expectedCountryAggregateCount split countries, found ${aggregateCodes.length}.',
+    );
+  }
+  for (final code in aggregateCodes) {
     final members = byCountry[code]!
       ..sort(
         (left, right) => string(
@@ -148,11 +163,11 @@ Future<void> prepareDetailedCountryRelease({
       ..['id'] = id
       ..['name'] = name
       ..['names'] = <String, Object?>{'en': name}
-      ..['file'] = '$id-detailed-2026.08.1.pmtiles'
+      ..['file'] = countryArchiveFile(id, contract)
       ..['countryCode'] = code
       ..['group'] = 'countries'
       ..['minZoom'] = 5
-      ..['maxZoom'] = 15
+      ..['maxZoom'] = contract.maxZoom
       ..['extract'] = <String, Object?>{
         'geoJson': geoJsonName,
         'bounds': <String, Object?>{
@@ -169,11 +184,11 @@ Future<void> prepareDetailedCountryRelease({
     ..['releaseTag'] = tag
     ..['regions'] = countries
     ..['quality'] = <String, Object?>{
-      'id': detailedQualityId,
-      'name': 'Detailed',
+      'id': contract.qualityId,
+      'name': contract.qualityId == detailedQualityId ? 'Detailed' : 'Good',
       'scope': 'country',
       'minZoom': 5,
-      'maxZoom': 15,
+      'maxZoom': contract.maxZoom,
       'pairedReleaseTag': 'maps-2026.08.1',
       'worldOverviewQualityId': 'good',
       'worldOverviewReleaseTag': 'maps-2026.08.1',
@@ -196,9 +211,10 @@ Future<void> prepareDetailedCountryRelease({
           await github.createDraft(
             tag: tag,
             target: target,
-            title: 'EasyElevation Detailed country maps $tag',
+            title:
+                'EasyElevation ${contract.qualityId == detailedQualityId ? 'Detailed' : 'Good'} country road maps $tag',
             body:
-                'One logical maxzoom-15 PMTiles archive per country or territory. Large archives use deterministic 1,900 MiB multipart transport. The regional z15 and Good releases remain unchanged.',
+                'Missing whole-country road-map aggregates for the 25 split country inventories at maxzoom ${contract.maxZoom}. Large archives use deterministic 1,900 MiB multipart transport. Existing regional releases remain unchanged during staging.',
           );
       if (!release.draft ||
           release.prerelease ||

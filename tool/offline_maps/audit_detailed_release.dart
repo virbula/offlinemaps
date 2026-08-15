@@ -72,7 +72,7 @@ Future<void> auditDetailedRelease({
       if (!countryCodes.add(code) ||
           region['id'] != '${code.toLowerCase()}-road' ||
           region['minZoom'] != 5 ||
-          region['maxZoom'] != 15) {
+          region['maxZoom'] != contract.maxZoom) {
         throw AutomationException(
           'Country manifest identity is invalid for $code.',
         );
@@ -87,8 +87,8 @@ Future<void> auditDetailedRelease({
     }
     final state = await readJsonObject(file);
     if (state['id'] != id ||
-        state['qualityId'] != detailedQualityId ||
-        state['maxZoom'] != 15 ||
+        state['qualityId'] != contract.qualityId ||
+        state['maxZoom'] != contract.maxZoom ||
         (contract.scope == 'country' && state['scope'] != 'country')) {
       throw AutomationException('State identity mismatch for $id.');
     }
