@@ -142,7 +142,12 @@ Future<void> buildDetailedRegion({
     final digest = await fileSha256(output);
     final transport = <String, Object?>{};
     if (exactBytes < githubTransportAssetLimitBytes) {
-      await _uploadOrKeepExact(github, releaseId: releaseId, file: output);
+      await _uploadOrKeepExact(
+        github,
+        releaseId: releaseId,
+        file: output,
+        replaceUnboundConflict: true,
+      );
       transport.addAll(<String, Object?>{
         'type': 'monolith',
         'downloadUrl': _downloadUrl(repository, tag, fileName),
@@ -162,6 +167,7 @@ Future<void> buildDetailedRegion({
           github,
           releaseId: releaseId,
           file: File(path.join(partsDirectory.path, part.file)),
+          replaceUnboundConflict: true,
         );
       }
       final descriptorFile = File(
@@ -233,30 +239,8 @@ Future<Map<String, Object?>?> _recoverRemoteState(
       (monolith.isNotEmpty && descriptors.isNotEmpty)) {
     throw AutomationException('Remote transport for $fileName is ambiguous.');
   }
-  if (monolith.length == 1) {
-    final asset = monolith.single;
-    if (asset.state != 'uploaded' ||
-        asset.size <= 0 ||
-        asset.size >= githubTransportAssetLimitBytes ||
-        asset.digest == null ||
-        !asset.digest!.startsWith('sha256:')) {
-      throw AutomationException('Retained monolith $fileName is invalid.');
-    }
-    return _detailedRecord(
-      manifest: manifest,
-      region: region,
-      repository: repository,
-      tag: tag,
-      exactBytes: asset.size,
-      sha256: asset.digest!.substring(7),
-      transport: <String, Object?>{
-        'type': 'monolith',
-        'downloadUrl': _downloadUrl(repository, tag, fileName),
-      },
-      tileCompression: 'gzip',
-      tileCount: null,
-    );
-  }
+  // A monolith without retained completed state is not descriptor-bound.
+  // Rebuild it and compare against the remote digest before it can be kept.
   if (descriptors.length == 1) {
     final descriptorAsset = descriptors.single;
     final temporary = File(
@@ -402,6 +386,7 @@ Future<void> _uploadOrKeepExact(
   required int releaseId,
   required File file,
   String contentType = 'application/octet-stream',
+  bool replaceUnboundConflict = false,
 }) async {
   final name = path.basename(file.path);
   final bytes = await file.length();
@@ -415,6 +400,19 @@ Future<void> _uploadOrKeepExact(
     releaseId,
   )).where((asset) => asset.name == name).toList();
   if (matches.isEmpty) {
+    await github.uploadAsset(
+      releaseId: releaseId,
+      file: file,
+      contentType: contentType,
+    );
+    return;
+  }
+  if (matches.length == 1 &&
+      assetMatches(matches.single, exactBytes: bytes, sha256: digest)) {
+    return;
+  }
+  if (matches.length == 1 && replaceUnboundConflict) {
+    await github.deleteAsset(matches.single.id);
     await github.uploadAsset(
       releaseId: releaseId,
       file: file,
