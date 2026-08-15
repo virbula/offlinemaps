@@ -52,10 +52,13 @@ Future<void> publishDetailedRelease({
     throw const AutomationException('GITHUB_TOKEN is required.');
   }
   final reviewed = await readJsonObject(reviewedAuditFile);
+  final releasePlan = await readJsonObject(releaseFile);
+  final tag = string(releasePlan['releaseTag'], 'releaseTag');
+  final contract = detailedContractForTag(tag);
   if (reviewed['passed'] != true ||
       reviewed['independentAudit'] != true ||
-      reviewed['releaseTag'] != detailedReleaseTag ||
-      reviewed['regionCount'] != expectedDetailedRegionCount) {
+      reviewed['releaseTag'] != tag ||
+      reviewed['regionCount'] != contract.expectedRegionCount) {
     throw const AutomationException('Reviewed independent audit is invalid.');
   }
   await outputDirectory.create(recursive: true);
@@ -98,10 +101,11 @@ Future<void> publishDetailedRelease({
   await writeJson(provenance, <String, Object?>{
     'schemaVersion': 1,
     'qualityId': detailedQualityId,
-    'releaseTag': detailedReleaseTag,
+    'releaseTag': tag,
+    'scope': contract.scope,
     'source': manifest['source'],
     'builder': manifest['builder'],
-    'regionCount': expectedDetailedRegionCount,
+    'regionCount': contract.expectedRegionCount,
     'minZoom': 5,
     'maxZoom': 15,
     'worldOverview': <String, Object?>{
@@ -109,13 +113,16 @@ Future<void> publishDetailedRelease({
       'retainedReleaseTag': 'maps-2026.08.1',
     },
   });
-  final releasePlan = await readJsonObject(releaseFile);
   final repository = string(releasePlan['repository'], 'repository');
   final releaseId = integer(releasePlan['releaseId'], 'releaseId');
   final target = string(releasePlan['targetCommitish'], 'targetCommitish');
   final github = GitHubReleaseClient(repository: repository, token: token);
   try {
-    _requireDraft(await github.releaseById(releaseId), target: target);
+    _requireDraft(
+      await github.releaseById(releaseId),
+      tag: tag,
+      target: target,
+    );
     final transportAssets = await github.listAssets(releaseId);
     final sums = File(path.join(outputDirectory.path, 'SHA256SUMS'));
     final lines = <String>[
@@ -140,10 +147,14 @@ Future<void> publishDetailedRelease({
             .containsAll(detailedMetadataNames)) {
       throw const AutomationException('Final Detailed inventory is not exact.');
     }
-    _requireDraft(await github.releaseById(releaseId), target: target);
+    _requireDraft(
+      await github.releaseById(releaseId),
+      tag: tag,
+      target: target,
+    );
     final published = await github.publishNotLatest(releaseId);
     if (published.id != releaseId ||
-        published.tagName != detailedReleaseTag ||
+        published.tagName != tag ||
         published.targetCommitish.toLowerCase() != target ||
         published.draft ||
         published.prerelease) {
@@ -154,13 +165,15 @@ Future<void> publishDetailedRelease({
     final latest = await github.latestRelease();
     if (latest == null ||
         latest.id == releaseId ||
-        latest.tagName != 'catalog-2026.08.1') {
+        !RegExp(
+          r'^catalog-[0-9]{4}\.[0-9]{2}\.[0-9]+$',
+        ).hasMatch(latest.tagName)) {
       throw const AutomationException(
         'Detailed publication changed GitHub latest.',
       );
     }
     for (final asset in finalAssets) {
-      await _verifyPublicAsset(repository, asset);
+      await _verifyPublicAsset(repository, tag, asset);
     }
   } finally {
     github.close();
@@ -193,8 +206,12 @@ Future<void> _uploadOrKeep(
   }
 }
 
-void _requireDraft(GitHubRelease release, {required String target}) {
-  if (release.tagName != detailedReleaseTag ||
+void _requireDraft(
+  GitHubRelease release, {
+  required String tag,
+  required String target,
+}) {
+  if (release.tagName != tag ||
       release.targetCommitish.toLowerCase() != target ||
       !release.draft ||
       release.prerelease) {
@@ -206,6 +223,7 @@ void _requireDraft(GitHubRelease release, {required String target}) {
 
 Future<void> _verifyPublicAsset(
   String repository,
+  String tag,
   GitHubReleaseAsset asset,
 ) async {
   final client = HttpClient();
@@ -214,7 +232,7 @@ Future<void> _verifyPublicAsset(
       final request = await client.getUrl(
         Uri.https(
           'github.com',
-          '/$repository/releases/download/$detailedReleaseTag/${asset.name}',
+          '/$repository/releases/download/$tag/${asset.name}',
         ),
       );
       request.followRedirects = true;

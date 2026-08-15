@@ -10,13 +10,45 @@ const int detailedPartBytes = 1900 * 1024 * 1024;
 const int githubTransportAssetLimitBytes = 2 * 1024 * 1024 * 1024;
 const int githubReleaseAssetCountLimit = 1000;
 const int expectedDetailedRegionCount = 553;
+const int expectedDetailedCountryCount = 246;
 const String detailedQualityId = 'detailed';
 
 const String detailedReleaseTag = 'maps-z15-2026.08.1';
-final RegExp detailedTagPattern = RegExp(r'^maps-z15-2026\.08\.1$');
+const String detailedCountryReleaseTag = 'maps-z15-country-2026.08.1';
+final RegExp detailedTagPattern = RegExp(
+  r'^maps-z15(?:-country)?-2026\.08\.1$',
+);
 final RegExp detailedAssetPattern = RegExp(
   r'^[a-z0-9][a-z0-9._-]{0,190}\.pmtiles$',
 );
+
+class DetailedReleaseContract {
+  const DetailedReleaseContract({
+    required this.tag,
+    required this.expectedRegionCount,
+    required this.scope,
+  });
+
+  final String tag;
+  final int expectedRegionCount;
+  final String scope;
+}
+
+DetailedReleaseContract detailedContractForTag(String tag) {
+  return switch (tag) {
+    detailedReleaseTag => const DetailedReleaseContract(
+      tag: detailedReleaseTag,
+      expectedRegionCount: expectedDetailedRegionCount,
+      scope: 'region',
+    ),
+    detailedCountryReleaseTag => const DetailedReleaseContract(
+      tag: detailedCountryReleaseTag,
+      expectedRegionCount: expectedDetailedCountryCount,
+      scope: 'country',
+    ),
+    _ => throw AutomationException('Unknown Detailed release tag $tag.'),
+  };
+}
 
 class DetailedTransportPart {
   const DetailedTransportPart({
@@ -97,6 +129,7 @@ Future<DetailedTransportDescriptor> splitDetailedArchive({
   required String releaseTag,
   int partBytes = detailedPartBytes,
   int minimumMultipartBytes = githubTransportAssetLimitBytes,
+  Future<void> Function(File file, DetailedTransportPart part)? onPart,
 }) async {
   final name = path.basename(archive.path);
   if (!detailedAssetPattern.hasMatch(name) ||
@@ -131,17 +164,20 @@ Future<DetailedTransportDescriptor> splitDetailedArchive({
     await current!.close();
     currentDigest.close();
     final fileName = partName(name, index);
-    parts.add(
-      DetailedTransportPart(
-        index: index,
-        file: fileName,
-        exactBytes: currentBytes,
-        sha256: currentDigestSink.value,
-        downloadUrl:
-            'https://github.com/$repository/releases/download/'
-            '$releaseTag/$fileName',
-      ),
+    final part = DetailedTransportPart(
+      index: index,
+      file: fileName,
+      exactBytes: currentBytes,
+      sha256: currentDigestSink.value,
+      downloadUrl:
+          'https://github.com/$repository/releases/download/'
+          '$releaseTag/$fileName',
     );
+    parts.add(part);
+    if (onPart != null) {
+      final file = File(path.join(outputDirectory.path, fileName));
+      await onPart(file, part);
+    }
     current = null;
   }
 

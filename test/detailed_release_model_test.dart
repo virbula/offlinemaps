@@ -46,10 +46,48 @@ void main() {
     expect(transportAssetCount([githubTransportAssetLimitBytes]), 7);
   });
 
-  test('only the approved z15 transport tag is accepted', () {
+  test('only approved immutable z15 transport tags are accepted', () {
     expect(detailedTagPattern.hasMatch('maps-z15-2026.08.1'), isTrue);
+    expect(detailedTagPattern.hasMatch('maps-z15-country-2026.08.1'), isTrue);
     expect(detailedTagPattern.hasMatch('maps-detailed-2026.08.1'), isFalse);
     expect(detailedTagPattern.hasMatch('maps-z15-2026.08.2'), isFalse);
     expect(detailedTagPattern.hasMatch('maps-2026.08.1'), isFalse);
+    expect(
+      detailedContractForTag(detailedCountryReleaseTag).expectedRegionCount,
+      expectedDetailedCountryCount,
+    );
+    expect(detailedContractForTag(detailedCountryReleaseTag).scope, 'country');
   });
+
+  test(
+    'multipart parts can upload and release runner disk incrementally',
+    () async {
+      final temporary = await Directory.systemTemp.createTemp('streamed-map-');
+      addTearDown(() => temporary.delete(recursive: true));
+      final archive = File(
+        '${temporary.path}/us-road-detailed-2026.08.1.pmtiles',
+      );
+      final bytes = List<int>.generate(37, (index) => (index * 19) % 256);
+      await archive.writeAsBytes(bytes);
+      final uploaded = <int>[];
+      final descriptor = await splitDetailedArchive(
+        archive: archive,
+        outputDirectory: Directory('${temporary.path}/parts'),
+        repository: 'virbula/offlinemaps',
+        releaseTag: detailedCountryReleaseTag,
+        partBytes: 10,
+        minimumMultipartBytes: 1,
+        onPart: (file, part) async {
+          final partBytes = await file.readAsBytes();
+          expect(partBytes.length, part.exactBytes);
+          expect(sha256.convert(partBytes).toString(), part.sha256);
+          uploaded.addAll(partBytes);
+          await file.delete();
+        },
+      );
+      expect(descriptor.parts.length, 4);
+      expect(uploaded, bytes);
+      expect(await Directory('${temporary.path}/parts').list().isEmpty, isTrue);
+    },
+  );
 }
