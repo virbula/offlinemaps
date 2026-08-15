@@ -168,7 +168,8 @@ jobs:
           test "${#matrix}" -lt 900000
           jq -e '.include | length <= 1' build/plan/matrix.json >/dev/null
           jq -e 'all(.include[]; (.shard | test("^[0-9]{3}$")) and (.regionIds | length >= 1 and length <= 12) and (all(.regionIds[]; test("^[a-z0-9][a-z0-9._-]{0,62}-road$"))))' build/plan/matrix.json >/dev/null
-          pending="$(jq -er '.pending | select(type == "boolean")' build/plan/release.json)"
+          jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null
+          pending="$(jq -r '.pending' build/plan/release.json)"
           plan_sha="$(jq -er '.poiPlanSha256 | select(test("^[a-f0-9]{64}$"))' build/plan/release.json)"
           target="$(jq -er '.targetCommitish | select(test("^[a-f0-9]{40}$"))' build/plan/release.json)"
           test "$target" = "$TARGET"

@@ -77,6 +77,39 @@ void main() {
       expect(workflow, contains(r'test "$target" = "$TARGET"'));
       expect(
         workflow,
+        contains(
+          r'''jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null''',
+        ),
+      );
+      expect(
+        workflow,
+        contains(r'''pending="$(jq -r '.pending' build/plan/release.json)"'''),
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'poi-pending-output-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      for (final value in const <bool>[false, true]) {
+        final file = File('${directory.path}/release.json');
+        await file.writeAsString(
+          jsonEncode(<String, Object?>{'pending': value}),
+        );
+        final validation = await Process.run('jq', <String>[
+          '-e',
+          '.pending | type == "boolean"',
+          file.path,
+        ]);
+        final output = await Process.run('jq', <String>[
+          '-r',
+          '.pending',
+          file.path,
+        ]);
+        expect(validation.exitCode, 0);
+        expect(output.exitCode, 0);
+        expect((output.stdout as String).trim(), '$value');
+      }
+      expect(
+        workflow,
         isNot(contains(r'${{ runner.tool_cache }}')),
         reason:
             'runner context is unavailable in job-level env and makes the '
