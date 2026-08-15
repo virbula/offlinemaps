@@ -217,4 +217,33 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+    'production cadence is semiannual with a quarterly catalog floor',
+    () async {
+      final poiWorkflow = await File(
+        '.github/workflows/poi-sidecars.yml',
+      ).readAsString();
+      final goodWorkflow = await File(
+        '.github/workflows/offline-maps.yml',
+      ).readAsString();
+      final detailedWorkflow = await File(
+        '.github/workflows/offline-maps-z15.yml',
+      ).readAsString();
+
+      expect(goodWorkflow, contains("cron: '17 3 10 1,7 *'"));
+      expect(detailedWorkflow, contains("cron: '47 3 11 1,7 *'"));
+      expect(
+        poiWorkflow,
+        contains('Enforce minimum quarterly catalog publication cadence'),
+      );
+      expect(poiWorkflow, contains('minimum_seconds=\$((90 * 24 * 60 * 60))'));
+      expect(
+        poiWorkflow.indexOf(
+          'Enforce minimum quarterly catalog publication cadence',
+        ),
+        lessThan(poiWorkflow.indexOf('Stage or publish the exact POI')),
+      );
+    },
+  );
 }
