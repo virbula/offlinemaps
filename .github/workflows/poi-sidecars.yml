@@ -1,0 +1,518 @@
+name: Build offline POI companions
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate the exact 553-region plan without creating drafts
+        required: true
+        type: boolean
+        default: false
+      expected_plan_sha:
+        description: Immutable POI plan SHA-256 for a continuation run
+        required: false
+        type: string
+        default: ''
+      iteration:
+        description: Bounded build-continuation counter
+        required: true
+        type: string
+        default: '0'
+      validation_iteration:
+        description: Bounded runtime-validation continuation counter
+        required: true
+        type: string
+        default: '0'
+      publish:
+        description: Publish reviewed drafts, promote catalog, and sync main
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: offlinemaps-release
+  queue: max
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DART_VERSION: '3.12.2'
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a trusted main-branch manual run
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          INPUT_EXPECTED_PLAN_SHA: ${{ inputs.expected_plan_sha }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_NAME" = workflow_dispatch
+          test "$REPOSITORY" = virbula/offlinemaps
+          if [[ -z "$INPUT_EXPECTED_PLAN_SHA" ]]; then
+            test "$REF" = refs/heads/main
+          else
+            [[ "$INPUT_EXPECTED_PLAN_SHA" =~ ^[a-f0-9]{64}$ ]]
+            test "$REF" = refs/tags/poi-2026.08.1
+          fi
+
+  check:
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make check
+
+  prepare:
+    needs: [guard, check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.outputs.outputs.matrix }}
+      pending: ${{ steps.outputs.outputs.pending }}
+      dry_run: ${{ steps.outputs.outputs.dry_run }}
+      publish: ${{ steps.outputs.outputs.publish }}
+      plan_sha: ${{ steps.outputs.outputs.plan_sha }}
+      iteration: ${{ steps.outputs.outputs.iteration }}
+      validation_iteration: ${{ steps.outputs.outputs.validation_iteration }}
+      target: ${{ steps.outputs.outputs.target }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      TARGET: ${{ github.sha }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      INPUT_EXPECTED_PLAN_SHA: ${{ inputs.expected_plan_sha }}
+      INPUT_ITERATION: ${{ inputs.iteration }}
+      INPUT_VALIDATION_ITERATION: ${{ inputs.validation_iteration }}
+      INPUT_PUBLISH: ${{ inputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - name: Generate the pinned region polygons
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/generate_worldwide_regions.dart \
+            --manifest config/offline-map-build.json \
+            --output-manifest build/poi-inputs/generated-manifest.json \
+            --cache-dir build/poi-inputs/cache
+          test "$(jq '.regions | length' build/poi-inputs/generated-manifest.json)" = 554
+      - name: Download the immutable base catalog metadata
+        run: |
+          set -euo pipefail
+          mkdir -p build/poi-inputs/base
+          for name in catalog.json road-catalog.json provenance.json; do
+            curl --fail-with-body --location --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 180 --retry 5 \
+              --retry-all-errors --retry-delay 2 \
+              --output "build/poi-inputs/base/$name" \
+              "https://github.com/$REPOSITORY/releases/download/catalog-2026.08.1/$name"
+          done
+      - name: Reconstruct remote state and prepare one bounded shard
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "$INPUT_DRY_RUN" == true ]]; then extra+=(--dry-run); fi
+          dart run tool/offline_maps/prepare_poi_release.dart \
+            --config config/offline-poi-build.json \
+            --manifest build/expected/manifest-maps-2026.08.1.json \
+            --base-catalog build/poi-inputs/base/catalog.json \
+            --base-road-catalog build/poi-inputs/base/road-catalog.json \
+            --base-provenance build/poi-inputs/base/provenance.json \
+            --regions-dir build/poi-inputs/worldwide-regions \
+            --output-dir build/plan \
+            --target "$TARGET" \
+            "${extra[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: poi-plan-${{ github.run_id }}
+          path: build/plan/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: true
+      - name: Expose bounded exact-plan state
+        id: outputs
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c . build/plan/matrix.json)"
+          test "${#matrix}" -lt 900000
+          jq -e '.include | length <= 1' build/plan/matrix.json >/dev/null
+          jq -e 'all(.include[]; (.shard | test("^[0-9]{3}$")) and (.regionIds | length >= 1 and length <= 12) and (all(.regionIds[]; test("^[a-z0-9][a-z0-9._-]{0,62}-road$"))))' build/plan/matrix.json >/dev/null
+          pending="$(jq -er '.pending | select(type == "boolean")' build/plan/release.json)"
+          plan_sha="$(jq -er '.poiPlanSha256 | select(test("^[a-f0-9]{64}$"))' build/plan/release.json)"
+          target="$(jq -er '.targetCommitish | select(test("^[a-f0-9]{40}$"))' build/plan/release.json)"
+          test "$target" = "$TARGET"
+          test "$(jq -r .regionCount build/plan/release.json)" = 553
+          test "$(jq -r .shardCount build/plan/release.json)" = 47
+          [[ "$INPUT_ITERATION" =~ ^[0-9]{1,2}$ ]]
+          (( 10#$INPUT_ITERATION <= 47 ))
+          [[ "$INPUT_VALIDATION_ITERATION" =~ ^[0-9]{1,2}$ ]]
+          (( 10#$INPUT_VALIDATION_ITERATION <= 47 ))
+          if [[ -n "$INPUT_EXPECTED_PLAN_SHA" ]]; then
+            [[ "$INPUT_EXPECTED_PLAN_SHA" =~ ^[a-f0-9]{64}$ ]]
+            (( 10#$INPUT_ITERATION >= 1 || 10#$INPUT_VALIDATION_ITERATION >= 1 ))
+            test "$INPUT_EXPECTED_PLAN_SHA" = "$plan_sha"
+          else
+            test "$INPUT_ITERATION" = 0
+            test "$INPUT_VALIDATION_ITERATION" = 0
+            test "$INPUT_PUBLISH" = false
+          fi
+          if [[ "$INPUT_DRY_RUN" == true ]]; then
+            test "$INPUT_PUBLISH" = false
+            test "$(jq -r .poiReleaseId build/plan/release.json)" = 0
+            test "$(jq -r .catalogReleaseId build/plan/release.json)" = 0
+          fi
+          if [[ "$pending" == true ]]; then
+            jq -e '.include | length == 1' build/plan/matrix.json >/dev/null
+            test "$INPUT_VALIDATION_ITERATION" = 0
+          else
+            jq -e '.include | length == 0' build/plan/matrix.json >/dev/null
+          fi
+          printf 'matrix=%s\npending=%s\ndry_run=%s\npublish=%s\nplan_sha=%s\niteration=%s\nvalidation_iteration=%s\ntarget=%s\n' \
+            "$matrix" "$pending" "$INPUT_DRY_RUN" "$INPUT_PUBLISH" "$plan_sha" "$INPUT_ITERATION" "$INPUT_VALIDATION_ITERATION" "$target" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: >-
+      needs.prepare.outputs.dry_run != 'true' &&
+      needs.prepare.outputs.pending == 'true' &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 1440
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SHARD: ${{ fromJSON(needs.prepare.outputs.matrix).include[0].shard }}
+      REGION_IDS_JSON: ${{ toJSON(fromJSON(needs.prepare.outputs.matrix).include[0].regionIds) }}
+      PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
+      POI_TOOL_CACHE: ${{ runner.tool_cache }}/../easyelevation-poi-tools
+      POI_BUILD_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: poi-plan-${{ github.run_id }}
+          path: build/plan
+      - name: Install the checksum-pinned POI tools in the runner cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$POI_TOOL_CACHE" build/tools
+          make poi_tools \
+            PMTILES="$POI_TOOL_CACHE/pmtiles-1.30.1" \
+            TILE_JOIN="$POI_TOOL_CACHE/tile-join-2.77.0"
+          ln -s "$POI_TOOL_CACHE/pmtiles-1.30.1" build/tools/pmtiles
+          ln -s "$POI_TOOL_CACHE/tile-join-2.77.0" build/tools/tile-join
+      - name: Check bounded build capacity
+        run: |
+          set -euo pipefail
+          mkdir -p "$POI_BUILD_CACHE_ROOT/$PLAN_SHA"
+          free_disk_bytes="$(df -Pk "$POI_BUILD_CACHE_ROOT" | awk 'NR==2 {print $4 * 1024}')"
+          required_disk_bytes="$((25 * 1024 * 1024 * 1024))"
+          test "$free_disk_bytes" -ge "$required_disk_bytes" || { echo "ERROR: POI shard requires $required_disk_bytes free bytes." >&2; exit 1; }
+          curl --fail-with-body --silent --show-error \
+            --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+            --header 'Range: bytes=0-0' \
+            --output /dev/null \
+            https://build.protomaps.com/20260811.pmtiles
+      - name: Build, verify, upload, and clean each companion
+        run: |
+          set -euo pipefail
+          region_ids="$(jq -er 'if type == "array" and length >= 1 and length <= 12 and all(.[]; test("^[a-z0-9][a-z0-9._-]{0,62}-road$")) then join(",") else error("invalid POI matrix") end' <<< "$REGION_IDS_JSON")"
+          dart run tool/offline_maps/build_poi_release_shard.dart \
+            --plan build/plan/poi-plan.json \
+            --release build/plan/release.json \
+            --regions-dir build/plan/regions \
+            --region-ids "$region_ids" \
+            --shard "$SHARD" \
+            --cache-dir "$POI_BUILD_CACHE_ROOT/$PLAN_SHA" \
+            --report "build/poi-report-$SHARD.json"
+          test -z "$(find "$POI_BUILD_CACHE_ROOT/$PLAN_SHA" -mindepth 1 -maxdepth 1 -print -quit)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: poi-report-${{ github.run_id }}
+          path: build/poi-report-${{ env.SHARD }}.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: true
+
+  continue:
+    needs: [prepare, build]
+    if: >-
+      needs.prepare.outputs.pending == 'true' &&
+      needs.prepare.outputs.dry_run != 'true' &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
+      ITERATION: ${{ needs.prepare.outputs.iteration }}
+      PUBLISH: ${{ needs.prepare.outputs.publish }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Dispatch the next exact-plan shard
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_SHA" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$ITERATION" =~ ^[0-9]{1,2}$ ]]
+          next_iteration="$((10#$ITERATION + 1))"
+          test "$next_iteration" -le 47
+          body="$(jq -cn --arg plan "$PLAN_SHA" --arg iteration "$next_iteration" --arg publish "$PUBLISH" '{ref:"poi-2026.08.1",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:"0",publish:$publish}}')"
+          curl --fail-with-body --silent --show-error \
+            --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY/actions/workflows/poi-sidecars.yml/dispatches" \
+            --data "$body"
+
+  validate-runtime:
+    needs: [prepare, build]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      needs.prepare.outputs.pending == 'false' &&
+      needs.prepare.outputs.dry_run != 'true' &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 1440
+    permissions:
+      contents: write
+    outputs:
+      pending: ${{ steps.outputs.outputs.pending }}
+      completed_region_count: ${{ steps.outputs.outputs.completed_region_count }}
+      validated_region_count: ${{ steps.outputs.outputs.validated_region_count }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      POI_TOOL_CACHE: ${{ runner.tool_cache }}/../easyelevation-poi-tools
+      POI_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-validation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: poi-plan-${{ github.run_id }}
+          path: build/plan
+      - name: Link the checksum-pinned PMTiles runtime
+        run: |
+          set -euo pipefail
+          mkdir -p "$POI_TOOL_CACHE" build/tools
+          make tools PMTILES="$POI_TOOL_CACHE/pmtiles-1.30.1"
+          ln -s "$POI_TOOL_CACHE/pmtiles-1.30.1" build/tools/pmtiles
+      - name: Reassemble and inspect the next exact-plan companions
+        id: outputs
+        run: |
+          set -euo pipefail
+          mkdir -p "$POI_VALIDATION_STATE_ROOT"
+          dart run tool/offline_maps/validate_poi_release.dart \
+            --plan build/plan/poi-plan.json \
+            --release build/plan/release.json \
+            --state-root "$POI_VALIDATION_STATE_ROOT" \
+            --work-dir build/poi-runtime-validation \
+            --result build/poi-validation-result.json \
+            --validation-report build/poi-validation.json \
+            --maximum-regions 12
+          pending="$(jq -er '.pending | select(type == "boolean")' build/poi-validation-result.json)"
+          completed="$(jq -er '.completedRegionCount | select(type == "number" and . >= 0 and . <= 553)' build/poi-validation-result.json)"
+          validated_now="$(jq -er '.validatedRegionCount | select(type == "number" and . >= 0 and . <= 12)' build/poi-validation-result.json)"
+          if [[ "$pending" == true ]]; then test "$completed" -lt 553; test "$validated_now" -ge 1; else test "$completed" = 553; fi
+          test -z "$(find build/poi-runtime-validation -type f -print -quit 2>/dev/null || true)"
+          printf 'pending=%s\ncompleted_region_count=%s\nvalidated_region_count=%s\n' "$pending" "$completed" "$validated_now" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.outputs.outputs.pending == 'false'
+        with:
+          name: poi-validation-${{ github.run_id }}
+          path: build/poi-validation.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          overwrite: true
+
+  continue-validation:
+    needs: [prepare, validate-runtime]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.validate-runtime.result == 'success' &&
+      needs.validate-runtime.outputs.pending == 'true' &&
+      fromJSON(needs.validate-runtime.outputs.validated_region_count) >= 1 &&
+      fromJSON(needs.validate-runtime.outputs.validated_region_count) <= 12 &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
+      BUILD_ITERATION: ${{ needs.prepare.outputs.iteration }}
+      VALIDATION_ITERATION: ${{ needs.prepare.outputs.validation_iteration }}
+      PUBLISH: ${{ needs.prepare.outputs.publish }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Dispatch the next exact-plan runtime validation
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_SHA" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$BUILD_ITERATION" =~ ^[0-9]{1,2}$ ]]
+          [[ "$VALIDATION_ITERATION" =~ ^[0-9]{1,2}$ ]]
+          next_validation_iteration="$((10#$VALIDATION_ITERATION + 1))"
+          test "$next_validation_iteration" -le 47
+          body="$(jq -cn --arg plan "$PLAN_SHA" --arg iteration "$BUILD_ITERATION" --arg validation_iteration "$next_validation_iteration" --arg publish "$PUBLISH" '{ref:"poi-2026.08.1",inputs:{dry_run:"false",expected_plan_sha:$plan,iteration:$iteration,validation_iteration:$validation_iteration,publish:$publish}}')"
+          curl --fail-with-body --silent --show-error \
+            --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+            --request POST \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY/actions/workflows/poi-sidecars.yml/dispatches" \
+            --data "$body"
+
+  finalize:
+    needs: [prepare, build, validate-runtime]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.validate-runtime.result == 'success' &&
+      needs.validate-runtime.outputs.pending == 'false' &&
+      needs.prepare.outputs.pending == 'false' &&
+      needs.prepare.outputs.dry_run != 'true' &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      TARGET: ${{ needs.prepare.outputs.target }}
+      PUBLISH: ${{ needs.prepare.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: poi-plan-${{ github.run_id }}
+          path: build/plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: poi-validation-${{ github.run_id }}
+          path: build/validation
+      - name: Stage or publish the exact POI and catalog metadata
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "$PUBLISH" == true ]]; then extra+=(--publish-poi); fi
+          dart run tool/offline_maps/finalize_poi_release.dart \
+            --plan build/plan/poi-plan.json \
+            --release build/plan/release.json \
+            --base-catalog build/plan/base-catalog.json \
+            --base-road-catalog build/plan/road-catalog.json \
+            --base-provenance build/plan/base-provenance.json \
+            --validation-report build/validation/poi-validation.json \
+            --output-dir build/metadata \
+            "${extra[@]}"
+      - name: Atomically sync publicly verified metadata to main
+        if: needs.prepare.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/sync_poi_metadata.dart \
+            --repository "$REPOSITORY" \
+            --expected-head "$TARGET" \
+            --plan-dir build/plan \
+            --metadata-dir build/metadata/catalog
+      - name: Publish and promote the catalog only after the metadata CAS
+        if: needs.prepare.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/finalize_poi_release.dart \
+            --plan build/plan/poi-plan.json \
+            --release build/plan/release.json \
+            --base-catalog build/plan/base-catalog.json \
+            --base-road-catalog build/plan/road-catalog.json \
+            --base-provenance build/plan/base-provenance.json \
+            --validation-report build/validation/poi-validation.json \
+            --output-dir build/metadata \
+            --promote-catalog
+
+  cleanup-cache:
+    needs: [prepare, finalize]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.finalize.result == 'success' &&
+      needs.prepare.outputs.publish == 'true' &&
+      github.repository == 'virbula/offlinemaps' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    env:
+      PLAN_SHA: ${{ needs.prepare.outputs.plan_sha }}
+      POI_BUILD_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-build
+      POI_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-poi-validation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+      - name: Remove only the published exact-plan cache and markers
+        run: |
+          set -euo pipefail
+          dart run tool/offline_maps/cleanup_poi_cache.dart \
+            --cache-root "$POI_BUILD_CACHE_ROOT" \
+            --plan-sha256 "$PLAN_SHA"
+          dart run tool/offline_maps/cleanup_poi_validation.dart \
+            --state-root "$POI_VALIDATION_STATE_ROOT" \
+            --plan-sha256 "$PLAN_SHA"

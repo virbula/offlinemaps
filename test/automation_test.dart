@@ -1057,11 +1057,11 @@ void main() {
       File('offline-regions.generated.json'),
     );
     final provenance = await readJsonObject(File('provenance.json'));
-    final manifest = File('build/expected/manifest-maps-2026.08.1.json');
+    final manifest = File('build/expected/manifest-catalog-2026.08.1.json');
     expect(deepJsonEquals(catalog, generated), isTrue);
     expect(objectList(catalog['regions'], 'regions'), hasLength(554));
     expect(await fileSha256(manifest), provenance['buildManifestSha256']);
-    expect(provenance['releaseTag'], 'maps-2026.08.1');
+    expect(provenance['releaseTag'], 'catalog-2026.08.1');
     expect(
       objectList(provenance['regions'], 'provenance.regions'),
       hasLength(554),

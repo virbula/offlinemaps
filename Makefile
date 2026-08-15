@@ -5,6 +5,9 @@ PMTILES_DARWIN_ARM64_SHA256 := 36a675972c0032064c5f7bc7a39e47d7f3a8c618de216b76d
 PMTILES_DARWIN_X64_SHA256 := 60c84fc6213cb0f4ef39c6926bbc4dd2327e77b53d182f994c2e87e5c3cd9b4c
 PMTILES_LINUX_ARM64_SHA256 := a1f9f42d8317ab1fadc25dd050e208547f32a3f99a4b90e7cb8fd6030f143d8e
 PMTILES_LINUX_X64_SHA256 := 23a2a2222f658320b539ccd06ac3b9b3b803ecbdd39a6cb5249d2ce2e16e38ae
+TIPPECANOE_VERSION := 2.77.0
+TIPPECANOE_SOURCE_SHA256 := 4cb152a705250ab37f09d02610df376599c4423efbda96b65ad26f41a966d29e
+TILE_JOIN ?= build/tools/tile-join
 VALHALLA_VERSION := 3.6.3
 VALHALLA_IMAGE := ghcr.io/valhalla/valhalla:$(VALHALLA_VERSION)@sha256:0cf1520c6a38b8a7e13a1931541e0ab6e9e42b64b4ca014293b6b8373d493160
 
@@ -59,6 +62,29 @@ tools:
 		else tar --extract --gzip --file "$$archive" --directory "$(dir $(PMTILES))" pmtiles; fi; \
 		rm "$$archive"; chmod 0755 "$(PMTILES)"; \
 		"$(PMTILES)" version | grep -F "pmtiles $(PMTILES_VERSION),"
+
+.PHONY: poi_tools
+poi_tools: tools
+	@set -eu; \
+		stamp="$(TILE_JOIN).version"; \
+		expected="$(TIPPECANOE_VERSION):$(TIPPECANOE_SOURCE_SHA256)"; \
+		if [ -x "$(TILE_JOIN)" ] && [ -f "$$stamp" ] && [ "$$(tr -d '\n' < "$$stamp")" = "$$expected" ]; then exit 0; fi; \
+		mkdir -p "$(dir $(TILE_JOIN))"; \
+		archive="$(TILE_JOIN).source.tar.gz"; \
+		source="$(TILE_JOIN).source"; \
+		curl --fail --location --proto '=https' --tlsv1.2 \
+		  "https://github.com/felt/tippecanoe/archive/refs/tags/$(TIPPECANOE_VERSION).tar.gz" \
+		  --output "$$archive"; \
+		if command -v shasum >/dev/null 2>&1; then actual="$$(shasum -a 256 "$$archive" | awk '{print $$1}')"; \
+		else actual="$$(sha256sum "$$archive" | awk '{print $$1}')"; fi; \
+		test "$$actual" = "$(TIPPECANOE_SOURCE_SHA256)" || { echo "ERROR: Tippecanoe source checksum mismatch."; exit 1; }; \
+		rm -rf "$$source"; mkdir -p "$$source"; \
+		tar --extract --gzip --file "$$archive" --directory "$$source" --strip-components=1; \
+		$${MAKE:-make} -C "$$source" -j2 tile-join; \
+		cp "$$source/tile-join" "$(TILE_JOIN).tmp"; chmod 0755 "$(TILE_JOIN).tmp"; \
+		mv "$(TILE_JOIN).tmp" "$(TILE_JOIN)"; \
+		printf '%s\n' "$$expected" > "$$stamp.tmp"; mv "$$stamp.tmp" "$$stamp"; \
+		rm -rf "$$source" "$$archive"
 
 .PHONY: check_offline_map_build_config
 check_offline_map_build_config:
@@ -233,3 +259,7 @@ check: deps
 	$(DART) format --output=none --set-exit-if-changed tool test
 	$(DART) analyze
 	$(DART) test
+
+.PHONY: test_poi_sidecars
+test_poi_sidecars: deps poi_tools
+	POI_INTEGRATION=true $(DART) test test/poi_sidecar_test.dart
