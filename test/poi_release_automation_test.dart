@@ -52,71 +52,125 @@ void main() {
     );
   });
 
-  test(
-    'workflow pins continuations and orders the catalog after main CAS',
-    () async {
-      final workflow = await File(
-        '.github/workflows/poi-sidecars.yml',
-      ).readAsString();
-      final publishPoi = workflow.indexOf('--publish-poi');
-      final sync = workflow.indexOf('sync_poi_metadata.dart');
-      final promoteCatalog = workflow.indexOf('--promote-catalog');
-      expect(workflow, contains('{ref:"poi-2026.08.1"'));
-      expect(workflow, isNot(contains('{ref:"main"')));
-      expect(workflow, contains(r'test "$target" = "$TARGET"'));
-      expect(
-        workflow,
-        isNot(contains(r'${{ runner.tool_cache }}')),
-        reason:
-            'runner context is unavailable in job-level env and makes the '
-            'workflow undispatchable',
-      );
-      expect(
-        RegExp(r'RUNNER_TOOL_CACHE is required').allMatches(workflow),
-        hasLength(3),
-      );
-      expect(
-        workflow,
+  test('workflow pins continuations and orders the catalog after main CAS', () async {
+    final workflow = await File(
+      '.github/workflows/poi-sidecars.yml',
+    ).readAsString();
+    final publishPoi = workflow.indexOf('--publish-poi');
+    final sync = workflow.indexOf('sync_poi_metadata.dart');
+    final promoteCatalog = workflow.indexOf('--promote-catalog');
+    expect(workflow, contains('{ref:"poi-2026.08.1"'));
+    expect(workflow, isNot(contains('{ref:"main"')));
+    expect(workflow, contains(r'test "$REF" = refs/heads/codex/poi-sidecars'));
+    expect(workflow, isNot(contains('refs/heads/main')));
+    expect(
+      RegExp(
+        r"github\.ref == 'refs/heads/codex/poi-sidecars'",
+      ).allMatches(workflow),
+      hasLength(6),
+    );
+    expect(workflow, contains(r'test "$target" = "$TARGET"'));
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(r'''pending="$(jq -r '.pending' build/plan/release.json)"'''),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/poi-validation-result.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''pending="$(jq -r '.pending' build/poi-validation-result.json)"''',
+      ),
+    );
+    final directory = await Directory.systemTemp.createTemp(
+      'poi-pending-output-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    for (final value in const <bool>[false, true]) {
+      final file = File('${directory.path}/release.json');
+      await file.writeAsString(jsonEncode(<String, Object?>{'pending': value}));
+      final validation = await Process.run('jq', <String>[
+        '-e',
+        '.pending | type == "boolean"',
+        file.path,
+      ]);
+      final output = await Process.run('jq', <String>[
+        '-r',
+        '.pending',
+        file.path,
+      ]);
+      expect(validation.exitCode, 0);
+      expect(output.exitCode, 0);
+      expect((output.stdout as String).trim(), '$value');
+    }
+    expect(
+      workflow,
+      isNot(contains(r'${{ runner.tool_cache }}')),
+      reason:
+          'runner context is unavailable in job-level env and makes the '
+          'workflow undispatchable',
+    );
+    expect(
+      RegExp(r'RUNNER_TOOL_CACHE is required').allMatches(workflow),
+      hasLength(3),
+    );
+    expect(
+      RegExp(r'PMTILES="\$POI_TOOL_CACHE/pmtiles"').allMatches(workflow),
+      hasLength(2),
+      reason: 'the pinned PMTiles zip expands to the literal basename pmtiles',
+    );
+    expect(workflow, contains(r'TILE_JOIN="$POI_TOOL_CACHE/tile-join"'));
+    expect(workflow, isNot(contains(r'$POI_TOOL_CACHE/pmtiles-1.30.1')));
+    expect(workflow, isNot(contains(r'$POI_TOOL_CACHE/tile-join-2.77.0')));
+    expect(
+      workflow,
+      contains(
+        "jq --sort-keys 'del(.routingDataset)' "
+        'config/offline-map-build.json',
+      ),
+      reason:
+          'POI polygon generation must not weaken the shared generator when '
+          'the synced main manifest intentionally omits routing graphs',
+    );
+    expect(
+      workflow,
+      contains('--manifest build/poi-inputs/region-manifest.json'),
+    );
+    expect(
+      workflow,
+      isNot(
         contains(
-          "jq --sort-keys 'del(.routingDataset)' "
-          'config/offline-map-build.json',
+          '--manifest config/offline-map-build.json \\\n'
+          '            --output-manifest build/poi-inputs/generated-manifest.json',
         ),
-        reason:
-            'POI polygon generation must not weaken the shared generator when '
-            'the synced main manifest intentionally omits routing graphs',
-      );
-      expect(
-        workflow,
-        contains('--manifest build/poi-inputs/region-manifest.json'),
-      );
-      expect(
-        workflow,
-        isNot(
-          contains(
-            '--manifest config/offline-map-build.json \\\n'
-            '            --output-manifest build/poi-inputs/generated-manifest.json',
-          ),
-        ),
-      );
-      expect(publishPoi, greaterThan(0));
-      expect(sync, greaterThan(publishPoi));
-      expect(promoteCatalog, greaterThan(sync));
+      ),
+    );
+    expect(publishPoi, greaterThan(0));
+    expect(sync, greaterThan(publishPoi));
+    expect(promoteCatalog, greaterThan(sync));
 
-      final finalizer = await File(
-        'tool/offline_maps/finalize_poi_release.dart',
-      ).readAsString();
-      expect(
-        finalizer.indexOf("github.branchHead('main')"),
-        lessThan(finalizer.indexOf('github.publishNotLatest(poiReleaseId)')),
-      );
-      expect(
-        finalizer.indexOf('verifyPoiMetadataOnMain('),
-        lessThan(
-          finalizer.indexOf('github.publishNotLatest(catalogReleaseId)'),
-        ),
-      );
-    },
-  );
+    final finalizer = await File(
+      'tool/offline_maps/finalize_poi_release.dart',
+    ).readAsString();
+    expect(
+      finalizer.indexOf("github.branchHead('main')"),
+      lessThan(finalizer.indexOf('github.publishNotLatest(poiReleaseId)')),
+    );
+    expect(
+      finalizer.indexOf('verifyPoiMetadataOnMain('),
+      lessThan(finalizer.indexOf('github.publishNotLatest(catalogReleaseId)')),
+    );
+  });
 
   test('only an exact empty single draft is recoverable', () async {
     var assets = '[]';

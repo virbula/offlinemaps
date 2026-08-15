@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require a trusted main-branch manual run
+      - name: Require a trusted POI branch or immutable-tag manual run
         env:
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
@@ -56,7 +56,7 @@ jobs:
           test "$EVENT_NAME" = workflow_dispatch
           test "$REPOSITORY" = virbula/offlinemaps
           if [[ -z "$INPUT_EXPECTED_PLAN_SHA" ]]; then
-            test "$REF" = refs/heads/main
+            test "$REF" = refs/heads/codex/poi-sidecars
           else
             [[ "$INPUT_EXPECTED_PLAN_SHA" =~ ^[a-f0-9]{64}$ ]]
             test "$REF" = refs/tags/poi-2026.08.1
@@ -168,7 +168,8 @@ jobs:
           test "${#matrix}" -lt 900000
           jq -e '.include | length <= 1' build/plan/matrix.json >/dev/null
           jq -e 'all(.include[]; (.shard | test("^[0-9]{3}$")) and (.regionIds | length >= 1 and length <= 12) and (all(.regionIds[]; test("^[a-z0-9][a-z0-9._-]{0,62}-road$"))))' build/plan/matrix.json >/dev/null
-          pending="$(jq -er '.pending | select(type == "boolean")' build/plan/release.json)"
+          jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null
+          pending="$(jq -r '.pending' build/plan/release.json)"
           plan_sha="$(jq -er '.poiPlanSha256 | select(test("^[a-f0-9]{64}$"))' build/plan/release.json)"
           target="$(jq -er '.targetCommitish | select(test("^[a-f0-9]{40}$"))' build/plan/release.json)"
           test "$target" = "$TARGET"
@@ -207,7 +208,7 @@ jobs:
       needs.prepare.outputs.dry_run != 'true' &&
       needs.prepare.outputs.pending == 'true' &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 1440
     permissions:
@@ -242,10 +243,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$POI_TOOL_CACHE" build/tools
           make poi_tools \
-            PMTILES="$POI_TOOL_CACHE/pmtiles-1.30.1" \
-            TILE_JOIN="$POI_TOOL_CACHE/tile-join-2.77.0"
-          ln -s "$POI_TOOL_CACHE/pmtiles-1.30.1" build/tools/pmtiles
-          ln -s "$POI_TOOL_CACHE/tile-join-2.77.0" build/tools/tile-join
+            PMTILES="$POI_TOOL_CACHE/pmtiles" \
+            TILE_JOIN="$POI_TOOL_CACHE/tile-join"
+          ln -s "$POI_TOOL_CACHE/pmtiles" build/tools/pmtiles
+          ln -s "$POI_TOOL_CACHE/tile-join" build/tools/tile-join
       - name: Check bounded build capacity
         run: |
           set -euo pipefail
@@ -286,7 +287,7 @@ jobs:
       needs.prepare.outputs.pending == 'true' &&
       needs.prepare.outputs.dry_run != 'true' &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -325,7 +326,7 @@ jobs:
       needs.prepare.outputs.pending == 'false' &&
       needs.prepare.outputs.dry_run != 'true' &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 1440
     permissions:
@@ -360,8 +361,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$POI_TOOL_CACHE" build/tools
-          make tools PMTILES="$POI_TOOL_CACHE/pmtiles-1.30.1"
-          ln -s "$POI_TOOL_CACHE/pmtiles-1.30.1" build/tools/pmtiles
+          make tools PMTILES="$POI_TOOL_CACHE/pmtiles"
+          ln -s "$POI_TOOL_CACHE/pmtiles" build/tools/pmtiles
       - name: Reassemble and inspect the next exact-plan companions
         id: outputs
         run: |
@@ -375,7 +376,8 @@ jobs:
             --result build/poi-validation-result.json \
             --validation-report build/poi-validation.json \
             --maximum-regions 12
-          pending="$(jq -er '.pending | select(type == "boolean")' build/poi-validation-result.json)"
+          jq -e '.pending | type == "boolean"' build/poi-validation-result.json >/dev/null
+          pending="$(jq -r '.pending' build/poi-validation-result.json)"
           completed="$(jq -er '.completedRegionCount | select(type == "number" and . >= 0 and . <= 553)' build/poi-validation-result.json)"
           validated_now="$(jq -er '.validatedRegionCount | select(type == "number" and . >= 0 and . <= 12)' build/poi-validation-result.json)"
           if [[ "$pending" == true ]]; then test "$completed" -lt 553; test "$validated_now" -ge 1; else test "$completed" = 553; fi
@@ -401,7 +403,7 @@ jobs:
       fromJSON(needs.validate-runtime.outputs.validated_region_count) >= 1 &&
       fromJSON(needs.validate-runtime.outputs.validated_region_count) <= 12 &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -443,7 +445,7 @@ jobs:
       needs.prepare.outputs.pending == 'false' &&
       needs.prepare.outputs.dry_run != 'true' &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -531,7 +533,7 @@ jobs:
       needs.finalize.result == 'success' &&
       needs.prepare.outputs.publish == 'true' &&
       github.repository == 'virbula/offlinemaps' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/poi-2026.08.1')
+      (github.ref == 'refs/heads/codex/poi-sidecars' || github.ref == 'refs/tags/poi-2026.08.1')
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 30
     env:

@@ -123,7 +123,8 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
         planSha256: planSha,
       );
       var descriptor = state.completed[id];
-      if (descriptor == null) {
+      var emptyMarker = state.emptyMarkers[id];
+      if (descriptor == null && emptyMarker == null) {
         final cache = Directory(path.join(options.cacheDirectory.path, id));
         if (await cache.exists()) await cache.delete(recursive: true);
         await cache.create(recursive: true);
@@ -131,7 +132,7 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
         final work = Directory(path.join(cache.path, 'work'));
         var uploaded = false;
         try {
-          final built = await buildPoiSidecar(
+          final outcome = await buildPoiSidecar(
             PoiSidecarBuildRequest(
               config: plan.configuration,
               region: region,
@@ -142,56 +143,80 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
               workDirectory: work,
             ),
           );
-          final parts = await splitPoiArchiveForTransport(
-            archive: output,
-            outputDirectory: cache,
-            transport: plan.configuration.transport,
-          );
-          descriptor = buildPoiDescriptor(
-            config: plan.configuration,
-            region: region,
-            tileCount: built.inspection.addressedTiles,
-            exactBytes: built.exactBytes,
-            sha256Digest: built.sha256,
-            parts: parts,
-          );
-          final transport = parts.isEmpty
-              ? <File>[output]
-              : <File>[
-                  for (final part in parts)
-                    File(path.join(cache.path, part.file)),
-                ];
-          assets = await github.listAssets(releaseId);
-          final missing = transport
-              .where(
-                (file) => !assets.any(
-                  (asset) => asset.name == path.basename(file.path),
-                ),
-              )
-              .length;
-          if (assets.length + missing >
-              plan.configuration.transport.maximumReleaseAssets) {
-            throw AutomationException(
-              '$id would exceed the POI release asset budget; no new bytes '
-              'were uploaded.',
-            );
-          }
-          for (var index = 0; index < transport.length; index++) {
-            remoteRelease = await github.releaseById(releaseId);
-            _validateDraft(remoteRelease, tag: releaseTag, target: target);
-            await _ensureUploaded(
-              github,
-              releaseId: releaseId,
-              file: transport[index],
-              label: poiAssetLabel(
-                planSha256: planSha,
-                logicalSha256: built.sha256,
-                logicalExactBytes: built.exactBytes,
+          switch (outcome) {
+            case PoiSidecarBuildResult built:
+              final parts = await splitPoiArchiveForTransport(
+                archive: output,
+                outputDirectory: cache,
+                transport: plan.configuration.transport,
+              );
+              descriptor = buildPoiDescriptor(
+                config: plan.configuration,
+                region: region,
                 tileCount: built.inspection.addressedTiles,
-                partIndex: index + 1,
-                partCount: transport.length,
-              ),
-            );
+                exactBytes: built.exactBytes,
+                sha256Digest: built.sha256,
+                parts: parts,
+              );
+              final transport = parts.isEmpty
+                  ? <File>[output]
+                  : <File>[
+                      for (final part in parts)
+                        File(path.join(cache.path, part.file)),
+                    ];
+              await _checkAssetBudget(
+                github,
+                releaseId: releaseId,
+                files: transport,
+                maximumAssets:
+                    plan.configuration.transport.maximumReleaseAssets,
+                regionId: id,
+              );
+              for (var index = 0; index < transport.length; index++) {
+                remoteRelease = await github.releaseById(releaseId);
+                _validateDraft(remoteRelease, tag: releaseTag, target: target);
+                await _ensureUploaded(
+                  github,
+                  releaseId: releaseId,
+                  file: transport[index],
+                  label: poiAssetLabel(
+                    planSha256: planSha,
+                    logicalSha256: built.sha256,
+                    logicalExactBytes: built.exactBytes,
+                    tileCount: built.inspection.addressedTiles,
+                    partIndex: index + 1,
+                    partCount: transport.length,
+                  ),
+                );
+              }
+            case PoiEmptySidecarBuildResult():
+              validateEmptyMarkerUploadPrecondition(
+                assets: assets,
+                region: region,
+              );
+              final marker = PoiEmptyMarker.forRegion(
+                region: region,
+                planSha256: planSha,
+              );
+              final markerFile = File(path.join(cache.path, marker.assetName));
+              await markerFile.writeAsString(marker.contents, flush: true);
+              await _checkAssetBudget(
+                github,
+                releaseId: releaseId,
+                files: <File>[markerFile],
+                maximumAssets:
+                    plan.configuration.transport.maximumReleaseAssets,
+                regionId: id,
+              );
+              remoteRelease = await github.releaseById(releaseId);
+              _validateDraft(remoteRelease, tag: releaseTag, target: target);
+              await _ensureUploaded(
+                github,
+                releaseId: releaseId,
+                file: markerFile,
+                label: marker.label,
+                contentType: 'application/json',
+              );
           }
           state = inspectPoiReleaseAssets(
             assets: await github.listAssets(releaseId),
@@ -199,11 +224,19 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
             planSha256: planSha,
           );
           final remoteDescriptor = state.completed[id];
-          if (remoteDescriptor == null ||
-              !deepJsonEquals(remoteDescriptor, descriptor)) {
+          final remoteEmptyMarker = state.emptyMarkers[id];
+          if (descriptor != null &&
+              (remoteDescriptor == null ||
+                  !deepJsonEquals(remoteDescriptor, descriptor))) {
             throw AutomationException('$id upload did not verify exactly.');
           }
+          if (descriptor == null && remoteEmptyMarker == null) {
+            throw AutomationException(
+              '$id empty marker did not verify exactly.',
+            );
+          }
           descriptor = remoteDescriptor;
+          emptyMarker = remoteEmptyMarker;
           uploaded = true;
         } finally {
           if (uploaded && await cache.exists()) {
@@ -211,12 +244,23 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
           }
         }
       }
-      validatePoiDescriptor(
-        descriptor: descriptor,
-        config: plan.configuration,
-        region: region,
-      );
-      completed.add(<String, Object?>{'id': id, 'poi': descriptor});
+      if (descriptor != null) {
+        validatePoiDescriptor(
+          descriptor: descriptor,
+          config: plan.configuration,
+          region: region,
+        );
+        completed.add(<String, Object?>{'id': id, 'poi': descriptor});
+      } else if (emptyMarker != null) {
+        completed.add(<String, Object?>{
+          'id': id,
+          'empty': true,
+          'emptyMarkerAsset': emptyMarker.assetName,
+          'emptyMarkerSha256': emptyMarker.sha256,
+        });
+      } else {
+        throw AutomationException('$id remains pending after its shard.');
+      }
     }
   } finally {
     github.close();
@@ -236,11 +280,29 @@ Future<void> buildPoiReleaseShard(PoiShardOptions options) async {
   });
 }
 
+void validateEmptyMarkerUploadPrecondition({
+  required List<GitHubReleaseAsset> assets,
+  required PoiPlanRegion region,
+}) {
+  final conflictingTransport = assets.where(
+    (asset) =>
+        asset.name == region.file ||
+        asset.name.startsWith('${region.file}.part'),
+  );
+  if (conflictingTransport.isNotEmpty) {
+    throw AutomationException(
+      '${region.id} produced an empty outcome after transport bytes were '
+      'already uploaded; no marker was uploaded.',
+    );
+  }
+}
+
 Future<void> _ensureUploaded(
   GitHubReleaseClient github, {
   required int releaseId,
   required File file,
   required String label,
+  String contentType = 'application/octet-stream',
 }) async {
   final name = path.basename(file.path);
   final bytes = await file.length();
@@ -249,7 +311,12 @@ Future<void> _ensureUploaded(
     releaseId,
   )).where((asset) => asset.name == name).toList(growable: false);
   if (matches.isEmpty) {
-    await github.uploadAsset(releaseId: releaseId, file: file, label: label);
+    await github.uploadAsset(
+      releaseId: releaseId,
+      file: file,
+      label: label,
+      contentType: contentType,
+    );
     return;
   }
   if (matches.length != 1 ||
@@ -258,6 +325,28 @@ Future<void> _ensureUploaded(
       matches.single.digest != 'sha256:$digest' ||
       matches.single.label != label) {
     throw AutomationException('$name conflicts with remote POI bytes.');
+  }
+}
+
+Future<void> _checkAssetBudget(
+  GitHubReleaseClient github, {
+  required int releaseId,
+  required List<File> files,
+  required int maximumAssets,
+  required String regionId,
+}) async {
+  final assets = await github.listAssets(releaseId);
+  final missing = files
+      .where(
+        (file) =>
+            !assets.any((asset) => asset.name == path.basename(file.path)),
+      )
+      .length;
+  if (assets.length + missing > maximumAssets) {
+    throw AutomationException(
+      '$regionId would exceed the POI release asset budget; no new bytes '
+      'were uploaded.',
+    );
   }
 }
 

@@ -144,7 +144,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       planSha256: planSha,
     );
     if (state.pendingRegionIds.isNotEmpty ||
-        state.completed.length != expectedPoiRegionCount) {
+        state.completedCandidateCount != expectedPoiRegionCount) {
       throw AutomationException(
         'POI release still has ${state.pendingRegionIds.length} pending '
         'regions.',
@@ -158,7 +158,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       releaseId: poiReleaseId,
       target: target,
       assets: poiAssets,
-      descriptors: state.completed,
+      releaseState: state,
     );
     final metadata = await writePoiReleaseMetadata(
       outputDirectory: Directory(
@@ -168,7 +168,8 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       planFile: options.plan,
       planSha256: planSha,
       descriptors: state.completed,
-      transportAssets: poiAssets
+      emptyMarkers: state.emptyMarkers,
+      dataAssets: poiAssets
           .where((asset) => !poiMetadataAssetNames.contains(asset.name))
           .toList(growable: false),
     );
@@ -180,6 +181,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       planExactBytes: planBytes,
       planSha256: planSha,
       descriptors: state.completed,
+      emptyMarkers: state.emptyMarkers,
       metadata: metadata,
     );
 
@@ -187,6 +189,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       baseCatalog: baseCatalog,
       plan: plan,
       descriptors: state.completed,
+      emptyRegionIds: state.emptyMarkers.keys.toSet(),
     );
     final catalogMetadata = await writePoiCatalogMetadata(
       outputDirectory: Directory(
@@ -199,6 +202,8 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       planSha256: planSha,
       descriptors: state.completed,
       poiTransportAssetCount: state.transportAssetCount,
+      emptyPoiRegionCount: state.emptyMarkers.length,
+      emptyMarkerAssetCount: state.emptyMarkerAssetCount,
     );
     await _stageCatalogMetadata(
       github,
@@ -212,7 +217,8 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
     );
     if (options.mode == PoiFinalizeMode.stage) {
       stdout.writeln(
-        'Staged ${state.completed.length} POI companions in '
+        'Staged ${state.completed.length} POI companions and '
+        '${state.emptyMarkers.length} empty outcomes in '
         '${plan.configuration.releaseTag} and coordinated '
         '${plan.configuration.catalogReleaseTag}; publication remains held.',
       );
@@ -255,6 +261,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       planExactBytes: planBytes,
       planSha256: planSha,
       descriptors: state.completed,
+      emptyMarkers: state.emptyMarkers,
       metadata: metadata,
     );
     await verifyPublicPoiRelease(
@@ -262,6 +269,7 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
       tag: plan.configuration.releaseTag,
       assets: poiAssets,
       metadata: <String, File>{poiPlanAssetName: options.plan, ...metadata},
+      emptyMarkers: state.emptyMarkers,
     );
 
     if (options.mode == PoiFinalizeMode.publishPoi) {
@@ -329,8 +337,8 @@ Future<void> finalizePoiRelease(PoiFinalizeOptions options) async {
     github.close();
   }
   stdout.writeln(
-    'Verified ${plan.configuration.releaseTag} with '
-    '$expectedPoiRegionCount companions and promoted '
+    'Verified all $expectedPoiRegionCount POI candidate outcomes in '
+    '${plan.configuration.releaseTag}; promoted '
     '${plan.configuration.catalogReleaseTag} as latest.',
   );
 }
@@ -339,13 +347,18 @@ Map<String, Object?> buildPoiJoinedCatalog({
   required Map<String, Object?> baseCatalog,
   required PoiReleasePlan plan,
   required Map<String, Map<String, Object?>> descriptors,
+  Set<String> emptyRegionIds = const <String>{},
 }) {
   final regions = objectList(baseCatalog['regions'], 'catalog.regions');
+  final planIds = plan.regions.map((region) => region.id).toSet();
   if (baseCatalog['schemaVersion'] != 2 ||
       baseCatalog['archiveFormat'] != 'pmtiles' ||
       baseCatalog['tileType'] != 'mvt' ||
       regions.length != 554 ||
-      descriptors.length != expectedPoiRegionCount) {
+      descriptors.keys.any((id) => !planIds.contains(id)) ||
+      emptyRegionIds.any((id) => !planIds.contains(id)) ||
+      descriptors.keys.any(emptyRegionIds.contains) ||
+      descriptors.length + emptyRegionIds.length != expectedPoiRegionCount) {
     throw const AutomationException('POI catalog inputs are incomplete.');
   }
   final planById = <String, PoiPlanRegion>{
@@ -369,8 +382,15 @@ Map<String, Object?> buildPoiJoinedCatalog({
       joined.add(Map<String, Object?>.from(record));
       continue;
     }
-    if (descriptor == null || planned == null) {
-      throw AutomationException('$id lacks a planned POI descriptor.');
+    if (planned == null) {
+      throw AutomationException('$id lacks a planned POI outcome.');
+    }
+    if (descriptor == null) {
+      if (!emptyRegionIds.contains(id)) {
+        throw AutomationException('$id lacks a planned POI outcome.');
+      }
+      joined.add(Map<String, Object?>.from(record));
+      continue;
     }
     validatePoiDescriptor(
       descriptor: descriptor,
@@ -403,8 +423,22 @@ Future<Map<String, File>> writePoiReleaseMetadata({
   required File planFile,
   required String planSha256,
   required Map<String, Map<String, Object?>> descriptors,
-  required List<GitHubReleaseAsset> transportAssets,
+  required Map<String, PoiEmptyMarker> emptyMarkers,
+  required List<GitHubReleaseAsset> dataAssets,
 }) async {
+  final planIds = plan.regions.map((region) => region.id).toSet();
+  if (descriptors.keys.any((id) => !planIds.contains(id)) ||
+      emptyMarkers.keys.any((id) => !planIds.contains(id)) ||
+      descriptors.length + emptyMarkers.length != plan.regions.length ||
+      descriptors.keys.any(emptyMarkers.containsKey)) {
+    throw const AutomationException('POI release outcomes are incomplete.');
+  }
+  final emptyAssetNames = emptyMarkers.values
+      .map((marker) => marker.assetName)
+      .toSet();
+  final transportAssets = dataAssets
+      .where((asset) => !emptyAssetNames.contains(asset.name))
+      .toList(growable: false);
   await outputDirectory.create(recursive: true);
   final descriptorFile = File(
     path.join(outputDirectory.path, poiDescriptorsAssetName),
@@ -414,10 +448,24 @@ Future<Map<String, File>> writePoiReleaseMetadata({
     'generatedAt': plan.configuration.generatedAt.toIso8601String(),
     'releaseTag': plan.configuration.releaseTag,
     'poiPlanSha256': planSha256,
+    'candidateRegionCount': plan.regions.length,
     'regionCount': descriptors.length,
+    'emptyPoiRegionCount': emptyMarkers.length,
     'regions': <Map<String, Object?>>[
       for (final region in plan.regions)
-        <String, Object?>{'id': region.id, 'poi': descriptors[region.id]},
+        if (descriptors[region.id] case final Map<String, Object?> descriptor)
+          <String, Object?>{'id': region.id, 'poi': descriptor},
+    ],
+    'emptyRegions': <Map<String, Object?>>[
+      for (final region in plan.regions)
+        if (emptyMarkers[region.id] case final PoiEmptyMarker marker)
+          <String, Object?>{
+            'id': region.id,
+            'file': region.file,
+            'emptyMarkerAsset': marker.assetName,
+            'emptyMarkerExactBytes': marker.exactBytes,
+            'emptyMarkerSha256': marker.sha256,
+          },
     ],
   });
   final provenance = File(
@@ -446,24 +494,41 @@ Future<Map<String, File>> writePoiReleaseMetadata({
     'maxZoom': plan.configuration.maxZoom,
     'sourceFeatureIdsPreserved': true,
     'overlapIdentity': 'exact Protomaps source MVT feature id',
+    'candidateRegionCount': plan.regions.length,
     'regionCount': descriptors.length,
+    'emptyPoiRegionCount': emptyMarkers.length,
     'logicalExactBytes': logicalBytes,
     'transportAssetCount': transportAssets.length,
+    'emptyMarkerAssetCount': emptyMarkers.length,
+    'dataAssetCount': dataAssets.length,
     'transportExactBytes': transportAssets.fold<int>(
       0,
       (sum, asset) => sum + asset.size,
     ),
     'regions': <Map<String, Object?>>[
       for (final region in plan.regions)
-        <String, Object?>{
-          'id': region.id,
-          'bounds': region.bounds.toJson(),
-          'geoJsonSha256': region.geoJsonSha256,
-          'file': descriptors[region.id]!['file'],
-          'outputSha256': descriptors[region.id]!['sha256'],
-          'outputBytes': descriptors[region.id]!['exactBytes'],
-          'addressedTiles': descriptors[region.id]!['tileCount'],
-        },
+        if (descriptors[region.id] case final Map<String, Object?> descriptor)
+          <String, Object?>{
+            'id': region.id,
+            'bounds': region.bounds.toJson(),
+            'geoJsonSha256': region.geoJsonSha256,
+            'empty': false,
+            'file': descriptor['file'],
+            'outputSha256': descriptor['sha256'],
+            'outputBytes': descriptor['exactBytes'],
+            'addressedTiles': descriptor['tileCount'],
+          }
+        else
+          <String, Object?>{
+            'id': region.id,
+            'bounds': region.bounds.toJson(),
+            'geoJsonSha256': region.geoJsonSha256,
+            'empty': true,
+            'file': region.file,
+            'addressedTiles': 0,
+            'emptyMarkerAsset': emptyMarkers[region.id]!.assetName,
+            'emptyMarkerSha256': emptyMarkers[region.id]!.sha256,
+          },
     ],
   });
   final checksums = File(
@@ -471,7 +536,7 @@ Future<Map<String, File>> writePoiReleaseMetadata({
   );
   final entries = <String, String>{
     poiPlanAssetName: await fileSha256(planFile),
-    for (final asset in transportAssets)
+    for (final asset in dataAssets)
       asset.name: asset.digest!.substring('sha256:'.length),
     poiDescriptorsAssetName: await fileSha256(descriptorFile),
     poiProvenanceAssetName: await fileSha256(provenance),
@@ -493,7 +558,14 @@ Future<Map<String, File>> writePoiCatalogMetadata({
   required String planSha256,
   required Map<String, Map<String, Object?>> descriptors,
   required int poiTransportAssetCount,
+  required int emptyPoiRegionCount,
+  required int emptyMarkerAssetCount,
 }) async {
+  if (descriptors.length + emptyPoiRegionCount != plan.regions.length ||
+      emptyPoiRegionCount < 0 ||
+      emptyMarkerAssetCount != emptyPoiRegionCount) {
+    throw const AutomationException('POI catalog outcome counts are invalid.');
+  }
   await outputDirectory.create(recursive: true);
   final catalog = File(path.join(outputDirectory.path, 'catalog.json'));
   final generated = File(
@@ -522,9 +594,12 @@ Future<Map<String, File>> writePoiCatalogMetadata({
     'catalogReleaseTag': plan.configuration.catalogReleaseTag,
     'poiReleaseTag': plan.configuration.releaseTag,
     'poiPlanSha256': planSha256,
+    'poiCandidateRegionCount': plan.regions.length,
     'poiRegionCount': descriptors.length,
+    'emptyPoiRegionCount': emptyPoiRegionCount,
     'poiLogicalExactBytes': logicalBytes,
     'poiTransportAssetCount': poiTransportAssetCount,
+    'poiEmptyMarkerAssetCount': emptyMarkerAssetCount,
     'poiBuilder': <String, Object?>{
       'pmtiles': plan.configuration.pmtilesBuilder.toJson(),
       'filter': plan.configuration.filterBuilder.toJson(),
@@ -696,6 +771,7 @@ Future<void> _validateExactPoiRelease({
   required int planExactBytes,
   required String planSha256,
   required Map<String, Map<String, Object?>> descriptors,
+  required Map<String, PoiEmptyMarker> emptyMarkers,
   required Map<String, File> metadata,
 }) async {
   final state = inspectPoiReleaseAssets(
@@ -705,9 +781,17 @@ Future<void> _validateExactPoiRelease({
   );
   if (state.pendingRegionIds.isNotEmpty ||
       state.completed.length != descriptors.length ||
+      state.emptyMarkers.length != emptyMarkers.length ||
       state.completed.entries.any(
         (entry) => !deepJsonEquals(entry.value, descriptors[entry.key]),
-      )) {
+      ) ||
+      state.emptyMarkers.entries.any((entry) {
+        final expected = emptyMarkers[entry.key];
+        return expected == null ||
+            entry.value.assetName != expected.assetName ||
+            entry.value.sha256 != expected.sha256 ||
+            entry.value.exactBytes != expected.exactBytes;
+      })) {
     throw const AutomationException('POI transport inventory changed.');
   }
   _validatePlanAsset(assets, exactBytes: planExactBytes, sha256: planSha256);
@@ -819,6 +903,7 @@ Future<void> verifyPublicPoiRelease({
   required String tag,
   required List<GitHubReleaseAsset> assets,
   required Map<String, File> metadata,
+  required Map<String, PoiEmptyMarker> emptyMarkers,
 }) async {
   for (final entry in metadata.entries) {
     await _verifyPublicFile(
@@ -829,8 +914,24 @@ Future<void> verifyPublicPoiRelease({
       file: entry.value,
     );
   }
+  for (final marker in emptyMarkers.values) {
+    await _verifyPublicContents(
+      Uri.https(
+        'github.com',
+        '/$repository/releases/download/$tag/${marker.assetName}',
+      ),
+      expectedBytes: utf8.encode(marker.contents),
+    );
+  }
+  final emptyAssetNames = emptyMarkers.values
+      .map((marker) => marker.assetName)
+      .toSet();
   final transport = assets
-      .where((asset) => !poiMetadataAssetNames.contains(asset.name))
+      .where(
+        (asset) =>
+            !poiMetadataAssetNames.contains(asset.name) &&
+            !emptyAssetNames.contains(asset.name),
+      )
       .toList(growable: false);
   const parallelism = 16;
   for (var offset = 0; offset < transport.length; offset += parallelism) {
@@ -893,8 +994,15 @@ Future<void> verifyPoiMetadataOnMain({
 }
 
 Future<void> _verifyPublicFile(Uri uri, {required File file}) async {
-  final expectedBytes = await file.length();
-  final expectedSha = await fileSha256(file);
+  await _verifyPublicContents(uri, expectedBytes: await file.readAsBytes());
+}
+
+Future<void> _verifyPublicContents(
+  Uri uri, {
+  required List<int> expectedBytes,
+}) async {
+  final expectedLength = expectedBytes.length;
+  final expectedSha = sha256TextBytes(expectedBytes);
   for (var attempt = 1; attempt <= 5; attempt++) {
     final client = HttpClient();
     try {
@@ -909,11 +1017,11 @@ Future<void> _verifyPublicFile(Uri uri, {required File file}) async {
         final output = BytesBuilder(copy: false);
         await for (final chunk in response) {
           received += chunk.length;
-          if (received > expectedBytes) break;
+          if (received > expectedLength) break;
           output.add(chunk);
         }
         final bytes = output.takeBytes();
-        if (received == expectedBytes &&
+        if (received == expectedLength &&
             sha256TextBytes(bytes) == expectedSha) {
           return;
         }

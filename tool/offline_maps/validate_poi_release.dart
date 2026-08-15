@@ -126,9 +126,9 @@ Future<void> validatePoiRelease(PoiValidationOptions options) async {
       planSha256: planSha,
     );
     if (releaseState.pendingRegionIds.isNotEmpty ||
-        releaseState.completed.length != expectedPoiRegionCount) {
+        releaseState.completedCandidateCount != expectedPoiRegionCount) {
       throw const AutomationException(
-        'Runtime validation requires every POI transport asset.',
+        'Runtime validation requires every POI candidate outcome.',
       );
     }
     _validatePlanAsset(assets, exactBytes: planBytes, sha256: planSha);
@@ -137,14 +137,14 @@ Future<void> validatePoiRelease(PoiValidationOptions options) async {
       final marker = File(path.join(markers.path, '${region.id}.json'));
       if (!await marker.exists()) continue;
       final value = await readJsonObject(marker);
-      final descriptor = releaseState.completed[region.id]!;
-      if (value['schemaVersion'] != poiSchemaVersion ||
-          value['poiPlanSha256'] != planSha ||
-          value['id'] != region.id ||
-          value['file'] != region.file ||
-          value['exactBytes'] != descriptor['exactBytes'] ||
-          value['sha256'] != descriptor['sha256'] ||
-          value['tileCount'] != descriptor['tileCount']) {
+      final expected = poiValidationMarker(
+        region: region,
+        planSha256: planSha,
+        descriptor: releaseState.completed[region.id],
+        emptyMarker: releaseState.emptyMarkers[region.id],
+      );
+      if (!deepJsonEquals(value, expected) ||
+          await marker.readAsString() != canonicalJson(expected)) {
         throw AutomationException('${marker.path} is stale or corrupt.');
       }
       validMarkers.add(region.id);
@@ -155,45 +155,48 @@ Future<void> validatePoiRelease(PoiValidationOptions options) async {
         .toList(growable: false);
     for (final region in pending) {
       stdout.writeln('Validating ${region.id} (${region.file})');
-      final descriptor = releaseState.completed[region.id]!;
+      final descriptor = releaseState.completed[region.id];
+      final emptyMarker = releaseState.emptyMarkers[region.id];
+      if (descriptor == null && emptyMarker == null) {
+        throw AutomationException('${region.id} has no completed outcome.');
+      }
       final work = Directory(path.join(options.workDirectory.path, region.id));
       await work.create(recursive: true);
       var succeeded = false;
       try {
-        final archive = await _downloadAndReconstruct(
-          github,
-          releaseId: releaseId,
-          assets: assets,
-          descriptor: descriptor,
-          workDirectory: work,
-        );
-        final inspection = await _inspectArchive(
-          archive,
-          pmtilesExecutable: plan.configuration.pmtilesBuilder.executable,
-        );
-        validatePoiPmtilesInspection(
-          inspection,
-          config: plan.configuration,
-          region: region,
-        );
-        if (inspection.addressedTiles != descriptor['tileCount'] ||
-            await archive.length() != descriptor['exactBytes'] ||
-            await fileSha256(archive) != descriptor['sha256']) {
-          throw AutomationException(
-            '${region.id} runtime bytes differ from its descriptor.',
+        if (descriptor != null) {
+          final archive = await _downloadAndReconstruct(
+            github,
+            releaseId: releaseId,
+            assets: assets,
+            descriptor: descriptor,
+            workDirectory: work,
           );
+          final inspection = await _inspectArchive(
+            archive,
+            pmtilesExecutable: plan.configuration.pmtilesBuilder.executable,
+          );
+          validatePoiPmtilesInspection(
+            inspection,
+            config: plan.configuration,
+            region: region,
+          );
+          if (inspection.addressedTiles != descriptor['tileCount'] ||
+              await archive.length() != descriptor['exactBytes'] ||
+              await fileSha256(archive) != descriptor['sha256']) {
+            throw AutomationException(
+              '${region.id} runtime bytes differ from its descriptor.',
+            );
+          }
         }
         await writeJson(
           File(path.join(markers.path, '${region.id}.json')),
-          <String, Object?>{
-            'schemaVersion': poiSchemaVersion,
-            'poiPlanSha256': planSha,
-            'id': region.id,
-            'file': region.file,
-            'exactBytes': descriptor['exactBytes'],
-            'sha256': descriptor['sha256'],
-            'tileCount': descriptor['tileCount'],
-          },
+          poiValidationMarker(
+            region: region,
+            planSha256: planSha,
+            descriptor: descriptor,
+            emptyMarker: emptyMarker,
+          ),
         );
         validMarkers.add(region.id);
         succeeded = true;
@@ -236,18 +239,21 @@ Future<void> validatePoiRelease(PoiValidationOptions options) async {
         'poiPlanSha256': planSha,
         'regionCount': plan.regions.length,
         'validatedRegionCount': completed,
+        'sidecarRegionCount': releaseState.completed.length,
+        'emptyPoiRegionCount': releaseState.emptyMarkers.length,
         'transportAssetCount': releaseState.transportAssetCount,
+        'emptyMarkerAssetCount': releaseState.emptyMarkerAssetCount,
         'releaseAssetCount': inventory.length,
         'releaseAssetInventorySha256': poiAssetInventorySha256(inventory),
         'regions': <Map<String, Object?>>[
           for (final region in plan.regions)
-            <String, Object?>{
-              'id': region.id,
-              'file': region.file,
-              'exactBytes': releaseState.completed[region.id]!['exactBytes'],
-              'sha256': releaseState.completed[region.id]!['sha256'],
-              'tileCount': releaseState.completed[region.id]!['tileCount'],
-            },
+            poiValidationMarker(
+              region: region,
+              planSha256: planSha,
+              descriptor: releaseState.completed[region.id],
+              emptyMarker: releaseState.emptyMarkers[region.id],
+              includePlanIdentity: false,
+            ),
         ],
       });
     }
@@ -284,7 +290,7 @@ Future<void> verifyPoiValidationReport({
   required int releaseId,
   required String target,
   required List<GitHubReleaseAsset> assets,
-  required Map<String, Map<String, Object?>> descriptors,
+  required PoiReleaseState releaseState,
 }) async {
   final value = await readJsonObject(report);
   final validatedAssets = assets
@@ -303,10 +309,10 @@ Future<void> verifyPoiValidationReport({
       value['poiPlanSha256'] != planSha256 ||
       value['regionCount'] != plan.regions.length ||
       value['validatedRegionCount'] != plan.regions.length ||
-      value['transportAssetCount'] !=
-          validatedAssets
-              .where((asset) => !poiMetadataAssetNames.contains(asset.name))
-              .length ||
+      value['sidecarRegionCount'] != releaseState.completed.length ||
+      value['emptyPoiRegionCount'] != releaseState.emptyMarkers.length ||
+      value['transportAssetCount'] != releaseState.transportAssetCount ||
+      value['emptyMarkerAssetCount'] != releaseState.emptyMarkerAssetCount ||
       value['releaseAssetCount'] != validatedAssets.length ||
       value['releaseAssetInventorySha256'] !=
           poiAssetInventorySha256(validatedAssets)) {
@@ -318,20 +324,57 @@ Future<void> verifyPoiValidationReport({
   }
   for (var index = 0; index < plan.regions.length; index++) {
     final region = plan.regions[index];
-    final descriptor = descriptors[region.id];
     final record = records[index];
-    if (descriptor == null ||
-        record['id'] != region.id ||
-        record['file'] != region.file ||
-        record['exactBytes'] != descriptor['exactBytes'] ||
-        record['sha256'] != descriptor['sha256'] ||
-        record['tileCount'] != descriptor['tileCount']) {
+    final expected = poiValidationMarker(
+      region: region,
+      planSha256: planSha256,
+      descriptor: releaseState.completed[region.id],
+      emptyMarker: releaseState.emptyMarkers[region.id],
+      includePlanIdentity: false,
+    );
+    if (!deepJsonEquals(record, expected)) {
       throw AutomationException('${region.id} validation record changed.');
     }
   }
   if (await report.readAsString() != canonicalJson(value)) {
     throw const AutomationException('POI validation report is noncanonical.');
   }
+}
+
+Map<String, Object?> poiValidationMarker({
+  required PoiPlanRegion region,
+  required String planSha256,
+  required Map<String, Object?>? descriptor,
+  required PoiEmptyMarker? emptyMarker,
+  bool includePlanIdentity = true,
+}) {
+  if (!poiSha256Pattern.hasMatch(planSha256) ||
+      (descriptor == null) == (emptyMarker == null)) {
+    throw AutomationException('${region.id} validation outcome is invalid.');
+  }
+  if (descriptor != null) {
+    return <String, Object?>{
+      'schemaVersion': poiSchemaVersion,
+      if (includePlanIdentity) 'poiPlanSha256': planSha256,
+      'id': region.id,
+      'file': region.file,
+      'empty': false,
+      'exactBytes': descriptor['exactBytes'],
+      'sha256': descriptor['sha256'],
+      'tileCount': descriptor['tileCount'],
+    };
+  }
+  return <String, Object?>{
+    'schemaVersion': poiSchemaVersion,
+    if (includePlanIdentity) 'poiPlanSha256': planSha256,
+    'id': region.id,
+    'file': region.file,
+    'empty': true,
+    'tileCount': 0,
+    'emptyMarkerAsset': emptyMarker!.assetName,
+    'emptyMarkerExactBytes': emptyMarker.exactBytes,
+    'emptyMarkerSha256': emptyMarker.sha256,
+  };
 }
 
 Future<File> _downloadAndReconstruct(

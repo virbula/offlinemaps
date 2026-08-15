@@ -355,7 +355,7 @@ void main() {
       await File('tool/offline_maps/prepare_release.dart').readAsString(),
       contains("'enabled': false"),
     );
-    expect(workflow, contains("cron: '17 3 10 * *'"));
+    expect(workflow, contains("cron: '17 3 10 1,7 *'"));
     expect(workflow, contains('actions: read'));
     expect(workflow, contains(r'RUN_ATTEMPT: ${{ github.run_attempt }}'));
     expect(workflow, isNot(contains('continue-on-error: true')));
