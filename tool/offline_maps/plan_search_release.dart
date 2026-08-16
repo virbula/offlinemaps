@@ -15,11 +15,12 @@
 /// PBF repeatedly. Every region sharing an extract points at the one index
 /// built from it.
 ///
-/// Two tiers, two releases, sized by measurement rather than estimate:
-///   places      settlements + streets, about 5% of the map it accompanies,
-///               so it ships by default
-///   addresses   house numbers, larger than the map itself, so it is a
-///               separate opt-in release
+/// Two releases, sized by measurement rather than estimate:
+///   places      settlements, streets and POIs; ships by default
+///   addresses   the same plus house numbers, so it is a self-contained
+///               superset and a user downloads one file rather than two
+/// Every row carries a coordinate: a result you can find but not navigate to
+/// is worse than no result.
 library;
 
 import 'dart:convert';
@@ -52,19 +53,18 @@ const int maximumSearchSourceBytes = 10 * 1024 * 1024 * 1024;
 
 const Set<String> searchTiers = <String>{'places', 'addresses'};
 
-/// Ratio of index bytes to source bytes, from a full Luxembourg build:
-/// a 45.2 MB extract produced a 0.68 MB places index and a 16.7 MB address
-/// index. Used only to project release size, never to gate a build.
-const double placesIndexSourceRatio = 0.015;
-const double addressIndexSourceRatio = 0.37;
+/// Gzipped index bytes per source byte, measured end to end on a full
+/// Luxembourg build (45.2 MB extract): 1.26 MB for places and 8.69 MB for the
+/// self-contained address superset. Used only to project release size, never
+/// to gate a build.
+const double placesIndexSourceRatio = 0.0279;
+const double addressIndexSourceRatio = 0.192;
 
-/// Indexes ship gzipped. Release assets are served uncompressed and an FTS5
-/// index is mostly text, so this is close to a threefold saving: measured 34%
-/// on a real build, which turns a 32 GB address release into about 11 GB.
-/// PMTiles deliberately does not do this -- its tiles are already compressed
-/// individually and the app fetches them by HTTP range, which whole-archive
-/// compression would break.
-const double searchIndexGzipRatio = 0.34;
+/// The address release carries settlements, streets and POIs as well as house
+/// numbers, so a user picks exactly one file rather than downloading both.
+/// Measured at 8.69 MB against 8.75 MB for the two separate indexes: one FTS5
+/// index shares a tokenizer dictionary, so the superset is actually smaller
+/// than the split it replaces.
 const String searchIndexCompression = 'gzip';
 
 Future<void> main(List<String> arguments) async {
@@ -202,8 +202,7 @@ Future<void> planSearchRelease({
         (exactBytes *
                 (tier == 'places'
                     ? placesIndexSourceRatio
-                    : addressIndexSourceRatio) *
-                searchIndexGzipRatio)
+                    : addressIndexSourceRatio))
             .round();
     indexes.add(<String, Object?>{
       'graphId': graphId,

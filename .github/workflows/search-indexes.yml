@@ -5,8 +5,9 @@ name: Build offline search indexes
 # route and browse POIs but cannot look up a destination by name.
 #
 # One workflow, two releases, selected by the tier input:
-#   places      settlements + streets   ~510 MB worldwide   ships by default
-#   addresses   house numbers           ~11 GB worldwide    opt-in
+#   places      settlements + streets + POIs      ~2.6 GB worldwide, default
+#   addresses   the same plus house numbers        ~18 GB worldwide, opt-in
+# The address release is a superset so a user downloads one file, not two.
 # Both ship gzipped. GitHub serves release assets raw -- it ignores
 # Accept-Encoding even on JSON, verified against a live asset -- and an FTS5
 # index compresses to 34%, so shipping uncompressed would treble the bytes.
@@ -297,8 +298,14 @@ jobs:
               exit 1
             }
 
-            tiers=settlements,streets
-            if [[ "$INPUT_TIER" == addresses ]]; then tiers=addresses; fi
+            # The address release is a self-contained superset: a user takes
+            # one file or the other, never both. Measured smaller than the two
+            # separate indexes it replaces, because one FTS5 index shares a
+            # tokenizer dictionary.
+            tiers=settlements,streets,pois
+            if [[ "$INPUT_TIER" == addresses ]]; then
+              tiers=settlements,streets,pois,addresses
+            fi
             build/osmvenv/bin/python tool/offline_maps/build_search_index.py \
               --input "$pbf" \
               --output "build/search-work/$raw_file" \
