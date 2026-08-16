@@ -126,28 +126,29 @@ jobs:
           sdk: ${{ env.DART_VERSION }}
       - run: make deps
 
-      - name: Generate the pinned region polygons
-        run: |
-          set -euo pipefail
-          mkdir -p build/search-inputs
-          dart run tool/offline_maps/generate_worldwide_regions.dart \
-            --manifest config/offline-map-build.json \
-            --output-manifest build/search-inputs/generated-manifest.json \
-            --cache-dir build/search-inputs/cache
-          test "$(jq '.regions | length' build/search-inputs/generated-manifest.json)" = 554
-
       - name: Resolve every extract to a dated, checksummed snapshot
         run: |
           set -euo pipefail
-          # Reused rather than reimplemented. Geofabrik's own ISO metadata is
-          # incomplete -- nothing in index-v1.json declares SA, Singapore is
-          # inside an extract advertising only MY, Kosovo carries no country
-          # code -- so naive matching drops whole countries. This resolver
-          # already handles that and pins each URL to a dated snapshot.
+          mkdir -p build/search-inputs
+          # Discovery runs against the raw config, exactly as the Makefile
+          # sequences it. It derives the regions itself, so generating the
+          # polygons first is both unnecessary and impossible: that generator
+          # enforces a routing coverage contract nothing can satisfy until
+          # discovery has populated the very graphs it validates.
+          #
+          # Reused rather than reimplemented, because Geofabrik's own ISO
+          # metadata is incomplete -- nothing in index-v1.json declares SA,
+          # Singapore sits inside an extract advertising only MY, and Kosovo
+          # carries no country code -- so matching on those fields drops 55
+          # countries.
           dart run tool/offline_maps/discover_routing_sources.dart \
-            --manifest build/search-inputs/generated-manifest.json \
+            --manifest config/offline-map-build.json \
             --output-manifest build/search-inputs/source-with-routing.json \
             --cache-dir build/search-inputs/cache
+          jq -e '.routingDataset.graphs | length >= 250' \
+            build/search-inputs/source-with-routing.json >/dev/null
+          jq -e '.routingDataset.regionGraphs | length >= 500' \
+            build/search-inputs/source-with-routing.json >/dev/null
 
       - name: Require one consistent snapshot date across every extract
         if: inputs.expected_source_date != ''
