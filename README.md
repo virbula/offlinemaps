@@ -16,6 +16,8 @@ The app catalog URL is:
 Use [docs/local-processing.md](docs/local-processing.md) for local planning,
 building, validation, and explicitly confirmed manual publication. See
 [docs/automation.md](docs/automation.md) for scheduled operations and recovery.
+See [docs/data-source.md](docs/data-source.md) for the complete upstream data,
+provenance, attribution, and licensing inventory.
 
 A Valhalla graph is routable topology, not a rendered basemap, so PMTiles are
 still required. Valhalla software is MIT licensed. Published graph databases

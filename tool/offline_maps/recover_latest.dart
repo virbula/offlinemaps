@@ -40,7 +40,6 @@ Future<void> main(List<String> arguments) async {
       target: target,
       expectedTag: tag,
       catalogFile: metadata['catalog.json']!,
-      generatedFile: metadata['offline-regions.generated.json']!,
       provenanceFile: metadata['provenance.json']!,
       checksumsFile: metadata['SHA256SUMS']!,
       token: token,
@@ -56,7 +55,6 @@ Future<void> recoverLatest({
   required String target,
   required String expectedTag,
   required File catalogFile,
-  required File generatedFile,
   required File provenanceFile,
   required File checksumsFile,
   required String token,
@@ -67,10 +65,6 @@ Future<void> recoverLatest({
     throw const AutomationException('Invalid recovery repository or target.');
   }
   final catalog = await readJsonObject(catalogFile);
-  final generated = await readJsonObject(generatedFile);
-  if (!deepJsonEquals(catalog, generated)) {
-    throw const AutomationException('Tracked catalog files differ.');
-  }
   final provenance = await readJsonObject(provenanceFile);
   final tag = string(provenance['releaseTag'], 'provenance.releaseTag');
   if (tag != expectedTag || provenance['githubRepository'] != repository) {
@@ -244,10 +238,6 @@ Future<void> recoverLatest({
       await catalogFile.length(),
       await fileSha256(catalogFile),
     ),
-    path.basename(generatedFile.path): (
-      await generatedFile.length(),
-      await fileSha256(generatedFile),
-    ),
     path.basename(provenanceFile.path): (
       await provenanceFile.length(),
       await fileSha256(provenanceFile),
@@ -275,7 +265,6 @@ Future<void> recoverLatest({
       ),
     for (final entry in routingExpected.entries) entry.key: entry.value.$2,
     path.basename(catalogFile.path): await fileSha256(catalogFile),
-    path.basename(generatedFile.path): await fileSha256(generatedFile),
     path.basename(provenanceFile.path): await fileSha256(provenanceFile),
   };
   if (!deepJsonEquals(parsedChecksums, expectedChecksums)) {
@@ -377,12 +366,7 @@ Future<void> recoverLatest({
       }
     }
     if (tasks.isNotEmpty) await Future.wait(tasks);
-    for (final file in <File>[
-      catalogFile,
-      generatedFile,
-      provenanceFile,
-      checksumsFile,
-    ]) {
+    for (final file in <File>[catalogFile, provenanceFile, checksumsFile]) {
       await _retryVerifyPublicAsset(
         url: Uri.https(
           'github.com',
@@ -719,7 +703,6 @@ Future<Map<String, File>> downloadRecoveryMetadata({
     final result = <String, File>{};
     for (final name in <String>[
       'catalog.json',
-      'offline-regions.generated.json',
       'provenance.json',
       'SHA256SUMS',
     ]) {

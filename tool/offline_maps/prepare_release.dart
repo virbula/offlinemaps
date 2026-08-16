@@ -403,7 +403,6 @@ Future<bool> _publicReleaseMatchesSource(
     final metadataBytes = <String, List<int>>{};
     for (final name in const <String>[
       'catalog.json',
-      'offline-regions.generated.json',
       'provenance.json',
       'SHA256SUMS',
     ]) {
@@ -435,12 +434,7 @@ Future<bool> _publicReleaseMatchesSource(
       jsonDecode(utf8.decode(metadataBytes['catalog.json']!)),
       'catalog',
     );
-    final generated = object(
-      jsonDecode(utf8.decode(metadataBytes['offline-regions.generated.json']!)),
-      'generated catalog',
-    );
-    if (!deepJsonEquals(catalog, generated) ||
-        provenance['releaseTag'] != release.tagName ||
+    if (provenance['releaseTag'] != release.tagName ||
         provenance['githubRepository'] != repository ||
         !deepJsonEquals(provenance['source'], source.toJson()) ||
         catalog['generatedAt'] != provenance['generatedAt'] ||
@@ -487,7 +481,6 @@ Future<bool> _publicReleaseMatchesSource(
           !mapFiles.contains(asset.name) &&
           !const <String>{
             'catalog.json',
-            'offline-regions.generated.json',
             'provenance.json',
             'SHA256SUMS',
           }.contains(asset.name),
@@ -628,9 +621,6 @@ Future<bool> _publicReleaseMatchesSource(
       for (final entry in routing.entries)
         entry.key: string(entry.value['sha256'], '${entry.key}.sha256'),
       'catalog.json': sha256.convert(metadataBytes['catalog.json']!).toString(),
-      'offline-regions.generated.json': sha256
-          .convert(metadataBytes['offline-regions.generated.json']!)
-          .toString(),
       'provenance.json': sha256
           .convert(metadataBytes['provenance.json']!)
           .toString(),

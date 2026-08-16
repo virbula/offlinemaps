@@ -11,7 +11,6 @@ import 'prepare_release.dart' show expectedRegionCount, validateDraftIdentity;
 import 'release_model.dart';
 
 const Set<String> metadataNames = <String>{
-  'offline-regions.generated.json',
   'provenance.json',
   'SHA256SUMS',
   'catalog.json',
@@ -195,7 +194,6 @@ Future<void> finalizeRelease(FinalizeOptions options) async {
     // Metadata names may exist only when resuming this same draft, and only if
     // their bytes already match exactly. Maps are never replaced or deleted.
     for (final name in <String>[
-      'offline-regions.generated.json',
       'provenance.json',
       'SHA256SUMS',
       'catalog.json', // catalog is deliberately uploaded last.
@@ -506,11 +504,7 @@ Future<Map<String, File>> _buildMetadata(
     'tileType': 'mvt',
     'regions': ordered,
   };
-  final generated = File(
-    path.join(output.path, 'offline-regions.generated.json'),
-  );
   final catalog = File(path.join(output.path, 'catalog.json'));
-  await writeJson(generated, catalogValue);
   await writeJson(catalog, catalogValue);
   final builder = object(manifest['builder'], 'builder');
   final routingBuilder = manifest['routingBuilder'] == null
@@ -581,12 +575,10 @@ Future<Map<String, File>> _buildMetadata(
           object(record['routing'], 'record.routing')['sha256'],
           'routing.sha256',
         ),
-    basename(generated): await fileSha256(generated),
     basename(catalog): await fileSha256(catalog),
     basename(provenance): await fileSha256(provenance),
   });
   return <String, File>{
-    basename(generated): generated,
     basename(provenance): provenance,
     basename(checksums): checksums,
     basename(catalog): catalog,
@@ -612,11 +604,7 @@ Future<Map<String, File>> _validateAndCopyAuthoritativeMetadata(
     result[name] = destination;
   }
   final catalog = await readJsonObject(result['catalog.json']!);
-  final generated = await readJsonObject(
-    result['offline-regions.generated.json']!,
-  );
-  if (jsonEncode(catalog) != jsonEncode(generated) ||
-      catalog['generatedAt'] != release['generatedAt']) {
+  if (catalog['generatedAt'] != release['generatedAt']) {
     throw const AutomationException(
       'Authoritative catalogs differ or have stale time.',
     );
@@ -652,9 +640,6 @@ Future<Map<String, File>> _validateAndCopyAuthoritativeMetadata(
           'routing.sha256',
         ),
     'catalog.json': await fileSha256(result['catalog.json']!),
-    'offline-regions.generated.json': await fileSha256(
-      result['offline-regions.generated.json']!,
-    ),
     'provenance.json': await fileSha256(result['provenance.json']!),
   });
   return result;

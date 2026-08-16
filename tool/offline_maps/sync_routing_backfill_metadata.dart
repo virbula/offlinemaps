@@ -63,9 +63,6 @@ Future<void> syncRoutingBackfillMetadata({
   }
   final files = <String, File>{
     'catalog.json': File(path.join(metadataDirectory.path, 'catalog.json')),
-    'offline-regions.generated.json': File(
-      path.join(metadataDirectory.path, 'offline-regions.generated.json'),
-    ),
     'provenance.json': File(
       path.join(metadataDirectory.path, 'provenance.json'),
     ),

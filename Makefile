@@ -26,7 +26,7 @@ OFFLINE_ROUTING_GRAPH_ID ?=
 OFFLINE_ROUTING_GRAPH_OUTPUT_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/routing-graphs
 OFFLINE_ROUTING_GRAPH_WORK_DIR ?= $(OFFLINE_MAP_BUILD_DIR)/routing-work
 
-OFFLINE_MAP_METADATA_FILES := catalog.json offline-regions.generated.json provenance.json SHA256SUMS
+OFFLINE_MAP_METADATA_FILES := catalog.json provenance.json SHA256SUMS
 
 .DEFAULT_GOAL := check
 
@@ -164,6 +164,14 @@ build_offline_routing_graph: deps routing_tools
 		--output-dir "$(OFFLINE_ROUTING_GRAPH_OUTPUT_DIR)" \
 		--cache-dir "$(OFFLINE_MAP_CACHE_DIR)/routing-source-$(OFFLINE_ROUTING_GRAPH_ID)" \
 		--work-dir "$(OFFLINE_ROUTING_GRAPH_WORK_DIR)"
+
+.PHONY: build_countrywide_routing
+build_countrywide_routing: routing_tools
+	./tool/offline_maps/run_countrywide_routing.sh
+
+.PHONY: build_continent_routing
+build_continent_routing: routing_tools
+	./tool/offline_maps/run_continent_routing.sh
 
 .PHONY: sync_offline_map_metadata
 sync_offline_map_metadata:

@@ -279,7 +279,6 @@ Future<void> finalizeRoutingBackfill(
       );
     } else {
       for (final name in const <String>[
-        'offline-regions.generated.json',
         'provenance.json',
         'SHA256SUMS',
         'catalog.json',
@@ -509,12 +508,8 @@ Future<Map<String, File>> _writeBackfillMetadata(
 }) async {
   final catalog = File(path.join(output.path, 'catalog.json'));
   final roadCatalog = File(path.join(output.path, 'road-catalog.json'));
-  final generated = File(
-    path.join(output.path, 'offline-regions.generated.json'),
-  );
   await writeJson(catalog, joinedCatalog);
   await writeJson(roadCatalog, baseCatalog);
-  await writeJson(generated, joinedCatalog);
   final builder = object(manifest['builder'], 'builder');
   final routingBuilder = object(manifest['routingBuilder'], 'routingBuilder');
   final regions = objectList(joinedCatalog['regions'], 'catalog.regions');
@@ -602,7 +597,6 @@ Future<Map<String, File>> _writeBackfillMetadata(
         ),
     'catalog.json': await fileSha256(catalog),
     'road-catalog.json': await fileSha256(roadCatalog),
-    'offline-regions.generated.json': await fileSha256(generated),
     'provenance.json': await fileSha256(provenance),
   };
   final lines =
@@ -610,7 +604,6 @@ Future<Map<String, File>> _writeBackfillMetadata(
         ..sort();
   await checksums.writeAsString('${lines.join('\n')}\n', flush: true);
   return <String, File>{
-    'offline-regions.generated.json': generated,
     'provenance.json': provenance,
     'SHA256SUMS': checksums,
     'catalog.json': catalog,

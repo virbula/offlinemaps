@@ -16,7 +16,6 @@ const int maximumGitHubReleaseAssets = 1000;
 const int standardHostedRunnerRoutingSourceBytes = 1024 * 1024 * 1024;
 const Set<String> catalogMetadataAssetNames = <String>{
   'catalog.json',
-  'offline-regions.generated.json',
   'provenance.json',
   'SHA256SUMS',
 };
