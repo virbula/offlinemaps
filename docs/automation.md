@@ -29,6 +29,15 @@ The stable road-only catalog is also preserved as `road-catalog.json` in a
 joined catalog release. The application first reads joined `catalog.json` and
 can fall back to `road-catalog.json` when routing is unavailable.
 
+Production map discovery runs in January and July. Catalog releases are
+normally promoted on that six-month cadence, and every catalog metadata
+finalizer must reject promotion less than 90 days after the current latest
+catalog. Manual companion-data builds may safely prepare drafts between
+releases, but cannot bypass this minimum quarterly publication interval.
+The initial `catalog-2026.08.2` POI companion completion is a one-time,
+exact-tag exception for the already-published `catalog-2026.08.1` source cycle;
+the workflow does not generalize that exception to later tags or cycles.
+
 ## Worldwide routing backfill
 
 `.github/workflows/routing-backfill.yml` is a trusted `workflow_dispatch` flow

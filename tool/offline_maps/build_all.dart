@@ -726,8 +726,10 @@ Future<void> buildAllOfflineMaps(
     );
   }
 
-  final catalog = File(path.join(outputDirectory.path, 'catalog.json'));
-  await _writeJson(catalog, <String, Object?>{
+  final generated = File(
+    path.join(outputDirectory.path, 'offline-regions.generated.json'),
+  );
+  await _writeJson(generated, <String, Object?>{
     'schemaVersion': 2,
     'generatedAt': manifest.generatedAt.toIso8601String(),
     'archiveFormat': 'pmtiles',
@@ -741,6 +743,8 @@ Future<void> buildAllOfflineMaps(
         )
         .toList(growable: false),
   });
+  final catalog = File(path.join(outputDirectory.path, 'catalog.json'));
+  await _writeJson(catalog, jsonDecode(await generated.readAsString()));
   final provenance = File(path.join(outputDirectory.path, 'provenance.json'));
   await _writeJson(provenance, <String, Object?>{
     'schemaVersion': 2,
@@ -795,6 +799,7 @@ Future<void> buildAllOfflineMaps(
         .map((artifact) => artifact.routingFile)
         .whereType<File>()
         .toSet(),
+    generated,
     catalog,
     provenance,
   ]);

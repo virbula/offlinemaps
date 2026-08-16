@@ -177,6 +177,7 @@ void main() {
       for (final name in const <String>[
         'california-road-2026.08.1.pmtiles',
         'france-idf-road-2026.08.1.pmtiles',
+        'offline-regions.generated.json',
         'catalog.json',
         'provenance.json',
         'SHA256SUMS',
@@ -204,7 +205,7 @@ void main() {
       expect((provenance['source']! as Map)['blake3'], '1' * 64);
       expect(
         await File('${output.path}/SHA256SUMS').readAsLines(),
-        hasLength(4),
+        hasLength(5),
       );
     },
   );
@@ -287,7 +288,7 @@ void main() {
     );
     expect(
       await File('${temporary.path}/output/SHA256SUMS').readAsLines(),
-      hasLength(5),
+      hasLength(6),
     );
   });
 

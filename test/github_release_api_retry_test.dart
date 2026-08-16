@@ -107,7 +107,7 @@ void main() {
     ]);
   });
 
-  test('POST transport failure is wrapped without retry', () async {
+  test('POST transport failure is reconciled without retry', () async {
     final delays = <Duration>[];
     var calls = 0;
     final client = GitHubReleaseClient(
@@ -115,7 +115,12 @@ void main() {
       token: 'test-token',
       requestExecutor: (method, uri, jsonBody) async {
         calls++;
-        throw HandshakeException('TLS handshake interrupted');
+        if (method == 'POST') {
+          throw HandshakeException('TLS handshake interrupted');
+        }
+        return uri.path.endsWith('/releases')
+            ? (statusCode: 200, body: '[]')
+            : (statusCode: 404, body: '{}');
       },
       retryDelay: (duration) async => delays.add(duration),
     );
@@ -137,8 +142,51 @@ void main() {
             ),
       ),
     );
-    expect(calls, 1);
+    expect(calls, 3);
     expect(delays, isEmpty);
+  });
+
+  test('draft create reconciles an exact ambiguous POST success', () async {
+    final methods = <String>[];
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async {
+        methods.add(method);
+        if (method == 'POST') {
+          throw const SocketException('response lost after upload');
+        }
+        return (statusCode: 200, body: jsonEncode(_releaseJson));
+      },
+    );
+    addTearDown(client.close);
+
+    final release = await client.createDraft(
+      tag: 'maps-2026.08.1',
+      target: 'a' * 40,
+      title: 'Maps',
+    );
+
+    expect(release.id, 42);
+    expect(release.draft, isTrue);
+    expect(methods, <String>['POST', 'GET']);
+  });
+
+  test('reads an exact commit-bound branch head', () async {
+    final client = GitHubReleaseClient(
+      repository: 'virbula/offlinemaps',
+      token: 'test-token',
+      requestExecutor: (method, uri, jsonBody) async => (
+        statusCode: 200,
+        body: jsonEncode(<String, Object?>{
+          'ref': 'refs/heads/main',
+          'object': <String, Object?>{'sha': 'a' * 40, 'type': 'commit'},
+        }),
+      ),
+    );
+    addTearDown(client.close);
+
+    expect(await client.branchHead('main'), 'a' * 40);
   });
 
   test('routing draft carries the reviewed attribution body', () async {
@@ -148,7 +196,13 @@ void main() {
       token: 'test-token',
       requestExecutor: (method, uri, jsonBody) async {
         sent = jsonBody;
-        return (statusCode: 201, body: jsonEncode(_releaseJson));
+        return (
+          statusCode: 201,
+          body: jsonEncode(<String, Object?>{
+            ..._releaseJson,
+            'tag_name': 'routing-2026.08.1',
+          }),
+        );
       },
     );
     addTearDown(client.close);
@@ -491,7 +545,12 @@ void main() {
       token: 'test-token',
       requestExecutor: (method, uri, jsonBody) async {
         calls++;
-        return (statusCode: 503, body: 'temporarily unavailable');
+        if (method == 'POST') {
+          return (statusCode: 503, body: 'temporarily unavailable');
+        }
+        return uri.path.endsWith('/releases')
+            ? (statusCode: 200, body: '[]')
+            : (statusCode: 404, body: '{}');
       },
       retryDelay: (duration) async => delays.add(duration),
     );
@@ -511,7 +570,7 @@ void main() {
         ),
       ),
     );
-    expect(calls, 1);
+    expect(calls, 3);
     expect(delays, isEmpty);
   });
 

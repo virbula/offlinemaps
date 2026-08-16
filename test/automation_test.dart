@@ -355,7 +355,7 @@ void main() {
       await File('tool/offline_maps/prepare_release.dart').readAsString(),
       contains("'enabled': false"),
     );
-    expect(workflow, contains("cron: '17 3 10 * *'"));
+    expect(workflow, contains("cron: '17 3 10 1,7 *'"));
     expect(workflow, contains('actions: read'));
     expect(workflow, contains(r'RUN_ATTEMPT: ${{ github.run_attempt }}'));
     expect(workflow, isNot(contains('continue-on-error: true')));
@@ -457,11 +457,29 @@ void main() {
     final validationJob = RegExp(
       r'\n  validate-runtime:\n([\s\S]*?)\n  continue-validation:',
     ).firstMatch(workflow)?.group(1);
+    final validationContinuationJob = RegExp(
+      r'\n  continue-validation:\n([\s\S]*?)\n  finalize:',
+    ).firstMatch(workflow)?.group(1);
+    final cleanupJob = RegExp(
+      r'\n  cleanup-cache:\n([\s\S]*)$',
+    ).firstMatch(workflow)?.group(1);
     expect(buildJob, isNotNull);
     expect(validationJob, isNotNull);
+    expect(validationContinuationJob, isNotNull);
+    expect(cleanupJob, isNotNull);
     expect(buildJob, contains('permissions:\n      contents: write'));
-    expect(validationJob, contains('permissions:\n      contents: read'));
-    expect(validationJob, isNot(contains('contents: write')));
+    expect(validationJob, contains('permissions:\n      contents: write'));
+    expect(
+      validationJob,
+      contains("GitHub's unpublished draft-release API rejects"),
+    );
+    expect(validationContinuationJob, contains('always() &&'));
+    expect(
+      validationContinuationJob,
+      contains("needs.prepare.result == 'success'"),
+    );
+    expect(cleanupJob, contains('always() &&'));
+    expect(cleanupJob, contains("needs.prepare.result == 'success'"));
     expect(
       workflow,
       contains('--validation-report build/validation/routing-validation.json'),
@@ -517,6 +535,54 @@ void main() {
       expect(validation.exitCode, 0);
       expect(output.exitCode, 0);
       expect(buildValidation.exitCode, 0);
+      expect((output.stdout as String).trim(), '$value');
+    }
+  });
+
+  test('routing workflow preserves false and true pending outputs', () async {
+    final workflow = await File(
+      '.github/workflows/routing-backfill.yml',
+    ).readAsString();
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(r'''pending="$(jq -r '.pending' build/plan/release.json)"'''),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''jq -e '.pending | type == "boolean"' build/routing-validation-result.json >/dev/null''',
+      ),
+    );
+    expect(
+      workflow,
+      contains(
+        r'''pending="$(jq -r '.pending' build/routing-validation-result.json)"''',
+      ),
+    );
+
+    final directory = await Directory.systemTemp.createTemp('pending-output-');
+    addTearDown(() => directory.delete(recursive: true));
+    for (final value in const <bool>[false, true]) {
+      final file = File('${directory.path}/result.json');
+      await file.writeAsString(jsonEncode(<String, Object?>{'pending': value}));
+      final validation = await Process.run('jq', <String>[
+        '-e',
+        '.pending | type == "boolean"',
+        file.path,
+      ]);
+      final output = await Process.run('jq', <String>[
+        '-r',
+        '.pending',
+        file.path,
+      ]);
+      expect(validation.exitCode, 0);
+      expect(output.exitCode, 0);
       expect((output.stdout as String).trim(), '$value');
     }
   });
@@ -987,11 +1053,15 @@ void main() {
 
   test('first release authoritative metadata and manifest agree', () async {
     final catalog = await readJsonObject(File('catalog.json'));
+    final generated = await readJsonObject(
+      File('offline-regions.generated.json'),
+    );
     final provenance = await readJsonObject(File('provenance.json'));
-    final manifest = File('build/expected/manifest-maps-2026.08.1.json');
+    final manifest = File('build/expected/manifest-catalog-2026.08.1.json');
+    expect(deepJsonEquals(catalog, generated), isTrue);
     expect(objectList(catalog['regions'], 'regions'), hasLength(554));
     expect(await fileSha256(manifest), provenance['buildManifestSha256']);
-    expect(provenance['releaseTag'], 'maps-2026.08.1');
+    expect(provenance['releaseTag'], 'catalog-2026.08.1');
     expect(
       objectList(provenance['regions'], 'provenance.regions'),
       hasLength(554),

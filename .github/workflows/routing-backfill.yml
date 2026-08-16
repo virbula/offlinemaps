@@ -152,7 +152,8 @@ jobs:
           jq -e '.requiresBuild | type == "boolean"' build/plan/release.json >/dev/null
           no_op="$(jq -r '.noOp' build/plan/release.json)"
           requires_build="$(jq -r '.requiresBuild' build/plan/release.json)"
-          pending="$(jq -er '.pending | select(type == "boolean")' build/plan/release.json)"
+          jq -e '.pending | type == "boolean"' build/plan/release.json >/dev/null
+          pending="$(jq -r '.pending' build/plan/release.json)"
           plan_sha="$(jq -er '.routingPlanSha256 | select(test("^[a-f0-9]{64}$"))' build/plan/release.json)"
           source_exact_bytes="$(jq -er '.routingSourceExactBytes | select(type == "number" and . > 0)' build/plan/release.json)"
           [[ "$INPUT_ITERATION" =~ ^[0-9]{1,3}$ ]]
@@ -359,8 +360,11 @@ jobs:
       github.ref == 'refs/heads/main'
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 1440
+    # GitHub's unpublished draft-release API rejects the Actions integration
+    # under contents:read even for GET requests. The validator itself remains
+    # read-only and its tests forbid release mutations.
     permissions:
-      contents: read
+      contents: write
     outputs:
       pending: ${{ steps.outputs.outputs.pending }}
       completed_graph_count: ${{ steps.outputs.outputs.completed_graph_count }}
@@ -408,7 +412,8 @@ jobs:
             --work-dir build/runtime-validation \
             --validation-report build/routing-validation.json \
             --result build/routing-validation-result.json
-          pending="$(jq -er '.pending | select(type == "boolean")' build/routing-validation-result.json)"
+          jq -e '.pending | type == "boolean"' build/routing-validation-result.json >/dev/null
+          pending="$(jq -r '.pending' build/routing-validation-result.json)"
           completed="$(jq -er '.completedGraphCount | select(type == "number" and . >= 1)' build/routing-validation-result.json)"
           total="$(jq -er '.graphCount | select(type == "number" and . >= 1)' build/routing-validation-result.json)"
           validated_now="$(jq -er '.validatedGraphCount | select(type == "number" and . >= 0 and . <= 16)' build/routing-validation-result.json)"
@@ -431,6 +436,8 @@ jobs:
   continue-validation:
     needs: [prepare, validate-runtime]
     if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
       needs.validate-runtime.result == 'success' &&
       needs.validate-runtime.outputs.pending == 'true' &&
       fromJSON(needs.validate-runtime.outputs.validated_graph_count) >= 1 &&
@@ -530,6 +537,8 @@ jobs:
   cleanup-cache:
     needs: [prepare, finalize]
     if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
       needs.finalize.result == 'success' &&
       needs.prepare.outputs.pending == 'false' &&
       needs.prepare.outputs.dry_run != 'true' &&

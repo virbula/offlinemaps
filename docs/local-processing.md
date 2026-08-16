@@ -115,9 +115,11 @@ offlinemaps/
       <completed PMTiles; ignored by Git>
       <completed .vtiles.tar routing packs; ignored by Git>
       catalog.json
+      offline-regions.generated.json
       provenance.json
       SHA256SUMS
   catalog.json
+  offline-regions.generated.json
   provenance.json
   SHA256SUMS
 ```
@@ -140,7 +142,8 @@ promotes it there. The command:
 5. validates PMTiles spec 3, clustering, gzip-compressed MVT tiles, requested
    bounds/zooms, basemap version, and the declared `roads` vector layer;
 6. atomically promotes each archive; and
-7. emits `catalog.json`, `provenance.json`, and `SHA256SUMS`.
+7. emits `offline-regions.generated.json`, `catalog.json`,
+   `provenance.json`, and `SHA256SUMS`.
 
 Useful preflights:
 
@@ -289,12 +292,12 @@ basemap remains a separate required download.
 This repository intentionally separates large release assets from reviewable
 release metadata. Keep completed `.pmtiles` archives in the ignored
 `build/local/output` release bundle and upload them only as GitHub Release
-assets. Track the three road-build root metadata files—`catalog.json`,
-`provenance.json`, and `SHA256SUMS`—so every published catalog and its
-provenance/checksum record can be reviewed in Git.
+assets. Track the four road-build root metadata files—`catalog.json`,
+`offline-regions.generated.json`, `provenance.json`, and `SHA256SUMS`—so every
+published catalog and its provenance/checksum record can be reviewed in Git.
 
 The checked-in `.gitignore` excludes PMTiles, partial/previous variants, and
-local build scratch while deliberately retaining the three metadata files.
+local build scratch while deliberately retaining the four metadata files.
 Never use `git add -f` for a PMTiles archive.
 
 Validate the complete bundle without changing GitHub; this command does not

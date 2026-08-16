@@ -480,10 +480,11 @@ void main() {
     );
     expect(plan.metadataAssets.map((asset) => asset.name).toSet(), <String>{
       'catalog.json',
+      'offline-regions.generated.json',
       'provenance.json',
       'SHA256SUMS',
     });
-    expect(plan.allAssets, hasLength(4));
+    expect(plan.allAssets, hasLength(5));
     expect(plan.allAssets.last.name, 'catalog.json');
     expect(plan.describe(), contains('will be deleted or clobbered'));
     expect(plan.describe(), contains('PMTiles remain ignored'));
@@ -533,7 +534,10 @@ void main() {
   test(
     'rejects a catalog URL that differs from the manifest release',
     () async {
-      for (final name in <String>['catalog.json']) {
+      for (final name in <String>[
+        'catalog.json',
+        'offline-regions.generated.json',
+      ]) {
         final file = File('${outputDirectory.path}/$name');
         final value =
             jsonDecode(await file.readAsString()) as Map<String, Object?>;

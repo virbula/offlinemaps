@@ -3,8 +3,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as path;
 
+import 'poi_model.dart';
 import 'release_model.dart';
-import 'routing_backfill_model.dart';
 
 Future<void> main(List<String> arguments) async {
   try {
@@ -21,7 +21,7 @@ Future<void> main(List<String> arguments) async {
     if (token == null || token.isEmpty) {
       throw const AutomationException('GITHUB_TOKEN is required.');
     }
-    await syncRoutingBackfillMetadata(
+    await syncPoiMetadata(
       repository: required('--repository'),
       expectedHead: required('--expected-head'),
       planDirectory: Directory(required('--plan-dir')),
@@ -29,12 +29,12 @@ Future<void> main(List<String> arguments) async {
       token: token,
     );
   } on AutomationException catch (error) {
-    stderr.writeln('Routing metadata sync failed: ${error.message}');
+    stderr.writeln('POI metadata sync failed: ${error.message}');
     exitCode = 2;
   }
 }
 
-Future<void> syncRoutingBackfillMetadata({
+Future<void> syncPoiMetadata({
   required String repository,
   required String expectedHead,
   required Directory planDirectory,
@@ -50,16 +50,17 @@ Future<void> syncRoutingBackfillMetadata({
   final release = await readJsonObject(
     File(path.join(planDirectory.path, 'release.json')),
   );
+  final planFile = File(path.join(planDirectory.path, poiPlanAssetName));
+  final plan = PoiReleasePlan.fromJson(await readJsonObject(planFile));
   final tag = string(release['catalogReleaseTag'], 'catalogReleaseTag');
-  final version = mapVersionForBackfillTag(
-    string(release['mapReleaseTag'], 'mapReleaseTag'),
-  );
-  if (release['schemaVersion'] != routingBackfillSchemaVersion ||
-      release['releaseTag'] != tag ||
-      tag != catalogTagForVersion(version)) {
-    throw const AutomationException(
-      'Routing sync release identity is invalid.',
-    );
+  final planSha256 = string(release['poiPlanSha256'], 'poiPlanSha256');
+  if (release['schemaVersion'] != poiSchemaVersion ||
+      release['mode'] != 'poi-sidecars' ||
+      release['poiReleaseTag'] != plan.configuration.releaseTag ||
+      tag != plan.configuration.catalogReleaseTag ||
+      release['targetCommitish'] != expectedHead ||
+      await fileSha256(planFile) != planSha256) {
+    throw const AutomationException('POI sync release identity is invalid.');
   }
   final files = <String, File>{
     'catalog.json': File(path.join(metadataDirectory.path, 'catalog.json')),
@@ -70,13 +71,24 @@ Future<void> syncRoutingBackfillMetadata({
       path.join(metadataDirectory.path, 'provenance.json'),
     ),
     'SHA256SUMS': File(path.join(metadataDirectory.path, 'SHA256SUMS')),
-    'build/expected/manifest-$tag.json': File(
-      path.join(planDirectory.path, 'manifest.json'),
-    ),
+    'build/expected/manifest-$tag.json': planFile,
   };
   if (files.values.any((file) => !file.existsSync())) {
-    throw const AutomationException('Routing sync inputs are incomplete.');
+    throw const AutomationException('POI sync inputs are incomplete.');
   }
+  final catalog = await readJsonObject(files['catalog.json']!);
+  final generated = await readJsonObject(
+    files['offline-regions.generated.json']!,
+  );
+  final provenance = await readJsonObject(files['provenance.json']!);
+  if (!deepJsonEquals(catalog, generated) ||
+      provenance['catalogReleaseTag'] != tag ||
+      provenance['poiReleaseTag'] != plan.configuration.releaseTag ||
+      provenance['poiPlanSha256'] != planSha256 ||
+      objectList(catalog['regions'], 'catalog.regions').length != 554) {
+    throw const AutomationException('POI sync metadata binding is invalid.');
+  }
+
   final api = _GitDataApi(repository: repository, token: token);
   try {
     final expectedCommit = await api.get('/git/commits/$expectedHead');
@@ -102,7 +114,7 @@ Future<void> syncRoutingBackfillMetadata({
       'tree': entries,
     });
     final candidateTree = string(tree['sha'], 'tree.sha');
-    final expectedMessage = 'Sync offline routing catalog $tag';
+    final expectedMessage = 'Sync offline POI catalog $tag';
     final reference = await api.get('/git/ref/heads/main');
     final head = string(
       object(reference['object'], 'ref.object')['sha'],
@@ -119,7 +131,7 @@ Future<void> syncRoutingBackfillMetadata({
         object(currentCommit['tree'], 'commit.tree')['sha'],
         'commit.tree.sha',
       );
-      if (isExactPriorRoutingSync(
+      if (isExactPriorPoiSync(
         parentShas: parentShas,
         message: currentCommit['message'],
         treeSha: currentTree,
@@ -127,7 +139,7 @@ Future<void> syncRoutingBackfillMetadata({
         expectedMessage: expectedMessage,
         expectedTreeSha: candidateTree,
       )) {
-        stdout.writeln('Routing metadata already matches the prior sync.');
+        stdout.writeln('POI metadata already matches the prior sync.');
         return;
       }
       throw AutomationException(
@@ -135,7 +147,7 @@ Future<void> syncRoutingBackfillMetadata({
       );
     }
     if (candidateTree == expectedBaseTree) {
-      stdout.writeln('Routing metadata is already current.');
+      stdout.writeln('POI metadata is already current.');
       return;
     }
     final next = await api.post('/git/commits', <String, Object?>{
@@ -152,7 +164,7 @@ Future<void> syncRoutingBackfillMetadata({
   }
 }
 
-bool isExactPriorRoutingSync({
+bool isExactPriorPoiSync({
   required List<String> parentShas,
   required Object? message,
   required String treeSha,

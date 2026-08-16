@@ -633,14 +633,24 @@ Future<int> validateRoutingArchiveWithPinnedValhalla(
   ], runInShell: false);
   var outputTail = '';
   var maximumTileCount = 0;
+  final reportedTileCounts = <int>{};
   var validatedTileRows = 0;
+  var graphArchiveLoadFailure = false;
   void consume(String line) {
     outputTail = _appendTail(outputTail, '$line\n');
     for (final match in RegExp(r'tile count: ([0-9]+)').allMatches(line)) {
       final value = int.tryParse(match.group(1)!);
-      if (value != null && value > maximumTileCount) maximumTileCount = value;
+      if (value != null) {
+        reportedTileCounts.add(value);
+        if (value > maximumTileCount) maximumTileCount = value;
+      }
     }
-    final rowMatch = RegExp(r'validated tile rows: ([0-9]+)').firstMatch(line);
+    if (routingRuntimeLogLineIndicatesGraphFailure(line)) {
+      graphArchiveLoadFailure = true;
+    }
+    final rowMatch = RegExp(
+      r'validated road-statistic rows: ([0-9]+)',
+    ).firstMatch(line);
     if (rowMatch != null) {
       validatedTileRows = int.tryParse(rowMatch.group(1)!) ?? 0;
     }
@@ -656,16 +666,51 @@ Future<int> validateRoutingArchiveWithPinnedValhalla(
       .forEach(consume);
   final exitCode = await process.exitCode;
   await Future.wait(<Future<void>>[stdoutFuture, stderrFuture]);
-  if (exitCode != 0 ||
-      maximumTileCount <= 0 ||
-      validatedTileRows != maximumTileCount) {
+  if (!routingRuntimeTraversalSucceeded(
+    exitCode: exitCode,
+    reportedArchiveTileCounts: reportedTileCounts,
+    roadStatisticTileCount: validatedTileRows,
+    graphArchiveLoadFailure: graphArchiveLoadFailure,
+  )) {
     throw AutomationException(
       'Pinned Valhalla runtime traversal failed for ${archive.path}: '
-      'exit $exitCode, extract tiles $maximumTileCount, traversed rows '
-      '$validatedTileRows.\n$outputTail',
+      'exit $exitCode, archive tile reports '
+      '${reportedTileCounts.toList()..sort()}, road-statistic rows '
+      '$validatedTileRows, graph load failure $graphArchiveLoadFailure.\n'
+      '$outputTail',
     );
   }
   return maximumTileCount;
+}
+
+bool routingRuntimeTraversalSucceeded({
+  required int exitCode,
+  required Iterable<int> reportedArchiveTileCounts,
+  required int roadStatisticTileCount,
+  required bool graphArchiveLoadFailure,
+}) {
+  // Valhalla 3.6.3 traverses every existing GraphReader tile, but its
+  // statistics database inserts only tile IDs that contributed non-link road
+  // statistics. Link-only, shortcut-only, or otherwise non-contributing graph
+  // tiles therefore do not necessarily produce one tiledata row.
+  final tileCounts = reportedArchiveTileCounts.toSet();
+  return exitCode == 0 &&
+      !graphArchiveLoadFailure &&
+      tileCounts.length == 1 &&
+      tileCounts.single > 0 &&
+      roadStatisticTileCount > 0 &&
+      roadStatisticTileCount <= tileCounts.single;
+}
+
+bool routingRuntimeLogLineIndicatesGraphFailure(String line) {
+  final lowerLine = line.toLowerCase();
+  return lowerLine.contains('[error]') ||
+      RegExp(
+        r'tile extract had ([1-9][0-9]*) corrupt blocks?',
+      ).hasMatch(lowerLine) ||
+      lowerLine.contains('tile extract contained no usable tiles') ||
+      lowerLine.contains('tile extract could not be loaded') &&
+          !lowerLine.contains('traffic tile extract');
 }
 
 String _appendTail(String current, String next, [int limit = 16000]) {
@@ -687,5 +732,5 @@ valhalla_build_statistics --config /tmp/valhalla.json --concurrency 2
 test -s statistics.sqlite
 tile_rows="$(python3 -c 'import sqlite3; connection = sqlite3.connect("statistics.sqlite"); print(connection.execute("select count(*) from tiledata").fetchone()[0])')"
 test "$tile_rows" -gt 0
-printf 'validated tile rows: %s\n' "$tile_rows"
+printf 'validated road-statistic rows: %s\n' "$tile_rows"
 ''';

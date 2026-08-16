@@ -23,7 +23,7 @@ Usage:
 The repository and release tag are read from the schema-v2 build manifest; they
 cannot be overridden on the command line. The input directory must be the
 output of build_all.dart and contain the PMTiles files, catalog.json,
-provenance.json, and SHA256SUMS.
+offline-regions.generated.json, provenance.json, and SHA256SUMS.
 
 The repository must be public and the GitHub CLI (gh) must already be signed
 in. The tool creates a draft release, uploads every generated file without
@@ -41,6 +41,7 @@ existing asset has the expected byte size and GitHub SHA-256 digest.
 
 const Set<String> _metadataAssetNames = <String>{
   'catalog.json',
+  'offline-regions.generated.json',
   'provenance.json',
   'SHA256SUMS',
 };
@@ -337,13 +338,31 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
   }
 
   final catalogFile = File(path.join(input.path, 'catalog.json'));
+  final generatedFile = File(
+    path.join(input.path, 'offline-regions.generated.json'),
+  );
   final provenanceFile = File(path.join(input.path, 'provenance.json'));
   final checksumsFile = File(path.join(input.path, 'SHA256SUMS'));
-  for (final file in <File>[catalogFile, provenanceFile, checksumsFile]) {
+  for (final file in <File>[
+    catalogFile,
+    generatedFile,
+    provenanceFile,
+    checksumsFile,
+  ]) {
     await _requireRegularFile(file, description: path.basename(file.path));
   }
 
   final catalog = await _decodeJsonObject(catalogFile, 'catalog.json');
+  final generated = await _decodeJsonObject(
+    generatedFile,
+    'offline-regions.generated.json',
+  );
+  if (jsonEncode(catalog) != jsonEncode(generated)) {
+    throw const GitHubPublishException(
+      'catalog.json and offline-regions.generated.json must contain the same '
+      'schema-v2 catalog.',
+    );
+  }
   _expectEqual(catalog['schemaVersion'], 2, 'catalog.schemaVersion');
   _expectEqual(catalog['archiveFormat'], 'pmtiles', 'catalog.archiveFormat');
   _expectEqual(catalog['tileType'], 'mvt', 'catalog.tileType');
@@ -623,6 +642,7 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
     for (final asset in regionAssets) asset.name: asset.localFile,
     for (final asset in routingAssets) asset.name: asset.localFile,
     'catalog.json': catalogFile,
+    'offline-regions.generated.json': generatedFile,
     'provenance.json': provenanceFile,
   };
   await _validateChecksumManifest(checksumsFile, hashedFiles);
@@ -631,6 +651,7 @@ Future<ValidatedGitHubReleaseBundle> validateGitHubReleaseBundle({
   for (final name in _metadataAssetNames) {
     final file = switch (name) {
       'catalog.json' => catalogFile,
+      'offline-regions.generated.json' => generatedFile,
       'provenance.json' => provenanceFile,
       'SHA256SUMS' => checksumsFile,
       _ => throw StateError('Unknown metadata asset $name'),
@@ -935,7 +956,7 @@ Future<void> _validateChecksumManifest(
           .isNotEmpty) {
     throw const GitHubPublishException(
       'SHA256SUMS must list exactly every PMTiles/routing archive plus '
-      'catalog.json and provenance.json.',
+      'catalog.json, offline-regions.generated.json, and provenance.json.',
     );
   }
   for (final entry in expectedFiles.entries) {

@@ -12,10 +12,19 @@ void main() {
   late Map<String, Object?> catalog;
 
   setUp(() async {
+    final publishedManifest = await readJsonObject(
+      File('build/expected/manifest-catalog-2026.08.1.json'),
+    );
+    final publishedCatalog = await readJsonObject(File('catalog.json'));
     manifest = await readJsonObject(
       File('build/expected/manifest-maps-2026.08.1.json'),
     );
-    catalog = await readJsonObject(File('catalog.json'));
+    catalog = normalizeBackfillRoadCatalog(
+      catalog: publishedCatalog,
+      manifest: publishedManifest,
+      repository: 'virbula/offlinemaps',
+      mapReleaseTag: 'maps-2026.08.1',
+    );
     manifest['routingBuilder'] = <String, Object?>{
       'dockerExecutable': 'docker',
       'image': supportedValhallaBuilderImage,

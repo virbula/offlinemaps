@@ -139,6 +139,25 @@ class GitHubReleaseClient {
         : GitHubTagRef.fromJson(jsonDecode(response.body));
   }
 
+  Future<String> branchHead(String branch) async {
+    if (!RegExp(
+      r'^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,98}[A-Za-z0-9])?$',
+    ).hasMatch(branch)) {
+      throw const AutomationException('GitHub branch name is invalid.');
+    }
+    final response = await _request(
+      'GET',
+      Uri.https('api.github.com', '/repos/$repository/git/ref/heads/$branch'),
+    );
+    final value = GitHubTagRef.fromJson(jsonDecode(response.body));
+    if (value.ref != 'refs/heads/$branch' ||
+        value.objectType != 'commit' ||
+        !RegExp(r'^[a-f0-9]{40}$').hasMatch(value.objectSha)) {
+      throw AutomationException('GitHub branch $branch is not a commit ref.');
+    }
+    return value.objectSha;
+  }
+
   Future<GitHubTagRef> ensureLightweightTag({
     required String tag,
     required String target,
@@ -244,21 +263,42 @@ class GitHubReleaseClient {
     required String title,
     String? body,
   }) async {
-    final response = await _request(
-      'POST',
-      Uri.https('api.github.com', '/repos/$repository/releases'),
-      jsonBody: <String, Object?>{
-        'tag_name': tag,
-        'target_commitish': target,
-        'name': title,
-        'body': ?body,
-        'draft': true,
-        'prerelease': false,
-        'make_latest': 'false',
-      },
-      accepted: const <int>{201},
-    );
-    return GitHubRelease.fromJson(jsonDecode(response.body));
+    GitHubRelease validate(GitHubRelease release) {
+      if (release.tagName != tag ||
+          release.targetCommitish.toLowerCase() != target ||
+          !release.draft ||
+          release.prerelease) {
+        throw AutomationException(
+          'GitHub draft $tag does not match the requested identity.',
+        );
+      }
+      return release;
+    }
+
+    try {
+      final response = await _request(
+        'POST',
+        Uri.https('api.github.com', '/repos/$repository/releases'),
+        jsonBody: <String, Object?>{
+          'tag_name': tag,
+          'target_commitish': target,
+          'name': title,
+          'body': ?body,
+          'draft': true,
+          'prerelease': false,
+          'make_latest': 'false',
+        },
+        accepted: const <int>{201},
+      );
+      return validate(GitHubRelease.fromJson(jsonDecode(response.body)));
+    } on AutomationException {
+      // A release POST can succeed even when its response is lost. Reconcile
+      // only the exact draft identity; an absent or conflicting release keeps
+      // the original mutation failure fatal.
+      final reconciled = await releaseByTag(tag);
+      if (reconciled == null) rethrow;
+      return validate(reconciled);
+    }
   }
 
   Future<List<GitHubReleaseAsset>> listAssets(int releaseId) async {
@@ -731,7 +771,7 @@ class GitHubReleaseClient {
 
 void _validateReleaseTag(String tag) {
   if (!RegExp(
-    r'^(routing|catalog)-[0-9]{4}\.[0-9]{2}\.[0-9]{1,2}$',
+    r'^(routing|catalog|poi)-[0-9]{4}\.[0-9]{2}\.[0-9]{1,2}$',
   ).hasMatch(tag)) {
     throw const AutomationException('GitHub release tag is invalid.');
   }
