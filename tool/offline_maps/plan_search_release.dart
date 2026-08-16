@@ -54,11 +54,11 @@ const int maximumSearchSourceBytes = 10 * 1024 * 1024 * 1024;
 const Set<String> searchTiers = <String>{'places', 'addresses'};
 
 /// Gzipped index bytes per source byte, measured end to end on a full
-/// Luxembourg build (45.2 MB extract): 1.26 MB for places and 8.69 MB for the
+/// Luxembourg build (45.2 MB extract): 1.39 MB for places and 8.82 MB for the
 /// self-contained address superset. Used only to project release size, never
 /// to gate a build.
-const double placesIndexSourceRatio = 0.0279;
-const double addressIndexSourceRatio = 0.192;
+const double placesIndexSourceRatio = 0.0308;
+const double addressIndexSourceRatio = 0.195;
 
 /// The address release carries settlements, streets and POIs as well as house
 /// numbers, so a user picks exactly one file rather than downloading both.

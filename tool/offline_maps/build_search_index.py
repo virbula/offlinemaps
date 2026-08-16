@@ -46,7 +46,7 @@ try:
 except ImportError:  # pragma: no cover - environment guard
     sys.exit('ERROR: pyosmium is required (pip install osmium).')
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 ALL_TIERS = ('settlements', 'streets', 'pois', 'addresses')
 DEFAULT_TIERS = 'settlements,streets,pois'
@@ -88,6 +88,28 @@ CELL_DEGREES = 0.1
 
 def _cell(latitude, longitude):
     return (round(latitude / CELL_DEGREES), round(longitude / CELL_DEGREES))
+
+
+# Proximity tokens, so "hospitals near me" is an index lookup rather than a
+# scan. Without them the query has to compute a distance for every category
+# match: measured at 296 ms over 500k restaurants in a US-scale index, versus
+# 3 ms when the same query is first narrowed to nearby cells.
+#
+# Three resolutions because density varies: roughly 11 km for a city, 55 km
+# for a region, 220 km so a rural search still finds something. The app queries
+# the nine cells around the user at the finest level and widens if too few
+# results come back.
+CELL_TOKEN_LEVELS = (('cn', 0.1), ('cf', 0.5), ('cc', 2.0))
+
+
+def _cell_tokens(latitude, longitude):
+    """Alphanumeric only: FTS5 parses '-' and '.' as query syntax, so a raw
+    negative longitude or a decimal cell size makes the query unparseable."""
+    return ' '.join(
+        f'{label}x{int((latitude + 90) / size):04d}'
+        f'y{int((longitude + 180) / size):04d}'
+        for label, size in CELL_TOKEN_LEVELS
+    )
 
 
 class _Extractor(osmium.SimpleHandler):
@@ -167,7 +189,8 @@ class _Extractor(osmium.SimpleHandler):
             '',
             tags.get('addr:city', '').strip(),
             tags.get('addr:postcode', '').strip(),
-            'address', ADDRESS_RANK, 0, latitude, longitude,
+            'address', _cell_tokens(latitude, longitude),
+            ADDRESS_RANK, 0, latitude, longitude,
         ))
 
     def node(self, n):
@@ -194,7 +217,8 @@ class _Extractor(osmium.SimpleHandler):
                 self.settlements.append((
                     name, self._alternate_names(n.tags), '',
                     tags.get('addr:postcode', '').strip(),
-                    kind, rank, self._population(tags), latitude, longitude,
+                    kind, _cell_tokens(latitude, longitude),
+                    rank, self._population(tags), latitude, longitude,
                 ))
             return
 
@@ -270,16 +294,18 @@ class _Extractor(osmium.SimpleHandler):
             yield row + (region,)
         for (name, _), (alt, city, postcode, lat, lon) in self.streets.items():
             yield (name, alt, self._locality(city, lat, lon), postcode,
-                   'street', STREET_RANK, 0, lat, lon, region)
+                   'street', _cell_tokens(lat, lon),
+                   STREET_RANK, 0, lat, lon, region)
         for (name, kind, _), (alt, city, postcode, lat, lon) in self.pois.items():
             yield (name, alt, self._locality(city, lat, lon), postcode,
-                   kind, POI_RANK, 0, lat, lon, region)
+                   kind, _cell_tokens(lat, lon),
+                   POI_RANK, 0, lat, lon, region)
         for row in self.addresses:
             yield row + (region,)
 
 
 COLUMNS = (
-    'name', 'alt', 'locality', 'postcode', 'kind',
+    'name', 'alt', 'locality', 'postcode', 'kind', 'cell',
     'rank_hint', 'population', 'lat', 'lon', 'region',
 )
 
@@ -290,7 +316,7 @@ COLUMNS = (
 # an unindexed column can only answer with a full table scan.
 _CREATE_TABLE = (
     "CREATE VIRTUAL TABLE search USING fts5("
-    "  name, alt, locality, postcode, kind,"
+    "  name, alt, locality, postcode, kind, cell,"
     "  rank_hint UNINDEXED, population UNINDEXED,"
     "  lat UNINDEXED, lon UNINDEXED, region UNINDEXED,"
     "  tokenize='unicode61 remove_diacritics 2')"
