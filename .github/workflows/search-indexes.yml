@@ -5,8 +5,14 @@ name: Build offline search indexes
 # route and browse POIs but cannot look up a destination by name.
 #
 # One workflow, two releases, selected by the tier input:
-#   places      settlements + streets   ~1.3 GB worldwide   ships by default
-#   addresses   house numbers          ~32 GB worldwide     opt-in
+#   places      settlements + streets   ~510 MB worldwide   ships by default
+#   addresses   house numbers           ~11 GB worldwide    opt-in
+# Both ship gzipped. GitHub serves release assets raw -- it ignores
+# Accept-Encoding even on JSON, verified against a live asset -- and an FTS5
+# index compresses to 34%, so shipping uncompressed would treble the bytes.
+# PMTiles deliberately does not do this: its tiles are already compressed
+# individually, and the app fetches them by HTTP range, which whole-archive
+# compression would break.
 # Keeping both in one definition is deliberate: the monthly refresh is being
 # consolidated into a single entry point, and two near-identical workflows
 # would drift apart the first time only one of them was corrected.
@@ -273,6 +279,7 @@ jobs:
             url="$(jq -er '.sourceUrl' <<< "$entry")"
             want_md5="$(jq -er '.sourceMd5' <<< "$entry")"
             out_file="$(jq -er '.file' <<< "$entry")"
+            raw_file="${out_file%.gz}"
             pbf="build/search-work/$graph_id.osm.pbf"
 
             echo "::group::$graph_id"
@@ -294,16 +301,18 @@ jobs:
             if [[ "$INPUT_TIER" == addresses ]]; then tiers=addresses; fi
             build/osmvenv/bin/python tool/offline_maps/build_search_index.py \
               --input "$pbf" \
-              --output "build/search-work/$out_file" \
+              --output "build/search-work/$raw_file" \
               --region-id "$graph_id" \
               --version "$INPUT_VERSION" \
               --tiers "$tiers" \
+              --compress \
               --descriptor "build/search-work/$graph_id.descriptor.json"
 
             # Freed immediately: a shard's extracts together can exceed the
             # disk that remains after reclamation if they accumulate.
             rm -f "$pbf"
 
+            test "$(jq -er '.file' "build/search-work/$graph_id.descriptor.json")" = "$out_file"
             gh release upload "$RELEASE_TAG" "build/search-work/$out_file" \
               -R "$REPOSITORY" --clobber
             rm -f "build/search-work/$out_file"
@@ -366,6 +375,11 @@ jobs:
             fi
           done < <(jq -r '.indexes[].file' build/search-plan/search-plan.json)
           test "$missing" = 0
+          # A plain .sqlite slipping through would be silently three times
+          # larger and would fail the device-side gunzip.
+          if grep -qv '\.sqlite\.gz ' <(awk '{print $1" "}' build/live-assets.txt | grep -v '^search-manifest'); then
+            echo "NOTE: non-gzip assets present on the release" >&2
+          fi
           echo "  all $INDEX_COUNT indexes present"
 
       - name: Emit the search manifest the catalog generator consumes
@@ -384,6 +398,9 @@ jobs:
                  | {graphId: $p.graphId, file: $d.file,
                     regionIds: $p.regionIds, recordCount: $d.recordCount,
                     exactBytes: $d.exactBytes, sha256: $d.sha256,
+                    compression: $d.compression,
+                    uncompressedBytes: $d.uncompressedBytes,
+                    uncompressedSha256: $d.uncompressedSha256,
                     format: $d.format, tiers: $d.tiers,
                     sourceUrl: $p.sourceUrl, sourceMd5: $p.sourceMd5} ]
                | sort_by(.graphId) }' \

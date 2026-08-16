@@ -58,6 +58,15 @@ const Set<String> searchTiers = <String>{'places', 'addresses'};
 const double placesIndexSourceRatio = 0.015;
 const double addressIndexSourceRatio = 0.37;
 
+/// Indexes ship gzipped. Release assets are served uncompressed and an FTS5
+/// index is mostly text, so this is close to a threefold saving: measured 34%
+/// on a real build, which turns a 32 GB address release into about 11 GB.
+/// PMTiles deliberately does not do this -- its tiles are already compressed
+/// individually and the app fetches them by HTTP range, which whole-archive
+/// compression would break.
+const double searchIndexGzipRatio = 0.34;
+const String searchIndexCompression = 'gzip';
+
 Future<void> main(List<String> arguments) async {
   try {
     final values = <String, String>{};
@@ -186,15 +195,19 @@ Future<void> planSearchRelease({
       // An extract no region uses would cost a download and serve nobody.
       continue;
     }
+    // Projected as shipped, which is gzipped. Reporting the raw size would
+    // overstate the download by three times and make the release-size review
+    // meaningless.
     projectedBytes +=
         (exactBytes *
                 (tier == 'places'
                     ? placesIndexSourceRatio
-                    : addressIndexSourceRatio))
+                    : addressIndexSourceRatio) *
+                searchIndexGzipRatio)
             .round();
     indexes.add(<String, Object?>{
       'graphId': graphId,
-      'file': 'search-$tier-$graphId-$version.sqlite',
+      'file': 'search-$tier-$graphId-$version.sqlite.gz',
       'sourceUrl': url,
       'sourceBytes': exactBytes,
       'sourceMd5': md5,
@@ -267,6 +280,7 @@ Future<void> planSearchRelease({
       0,
       (sum, i) => sum + (i['sourceBytes']! as int),
     ),
+    'compression': searchIndexCompression,
     'projectedIndexBytes': projectedBytes,
     'indexes': indexes,
   };

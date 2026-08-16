@@ -261,6 +261,20 @@ void main() {
     );
   });
 
+  test('indexes ship gzipped', () async {
+    // Release assets are served raw: GitHub ignores Accept-Encoding on them,
+    // verified against a live asset. An FTS5 index is mostly text, so shipping
+    // uncompressed costs roughly three times the bytes.
+    final directory = await workspace();
+    await write(directory, manifest());
+    final result = await plan(directory);
+    expect(result['compression'], 'gzip');
+    for (final index
+        in (result['indexes']! as List).cast<Map<String, Object?>>()) {
+      expect(index['file']! as String, endsWith('.sqlite.gz'));
+    }
+  });
+
   test('file names are safe for a release asset and a filesystem', () async {
     final directory = await workspace();
     await write(directory, manifest());
@@ -271,7 +285,7 @@ void main() {
         index['file']! as String,
         matches(
           RegExp(
-            r'^search-[a-z]+-[a-z0-9][a-z0-9._-]*-\d{4}\.\d{2}\.\d+\.sqlite$',
+            r'^search-[a-z]+-[a-z0-9][a-z0-9._-]*-\d{4}\.\d{2}\.\d+\.sqlite\.gz$',
           ),
         ),
       );

@@ -27,9 +27,11 @@ they ship by default. Addresses cost about 130% of it and are a separate
 opt-in release rather than a supplement.
 """
 import argparse
+import gzip
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 
@@ -156,6 +158,27 @@ def _write_index(path, rows):
     return os.path.getsize(path)
 
 
+def _compress(path):
+    """Gzips the index for transport, deterministically.
+
+    Release assets are served uncompressed, and an FTS5 index is mostly text:
+    measured 34% of original on a real build, so shipping raw costs roughly
+    three times the bytes. That is the difference between a 32 GB address
+    release and an 11 GB one.
+
+    mtime=0 and an empty filename field matter. Gzip stores both in its header
+    by default, so two runs over identical input would otherwise differ and
+    break the SHA-256 the catalog pins.
+    """
+    compressed = f'{path}.gz'
+    with open(path, 'rb') as raw, open(compressed, 'wb') as handle:
+        with gzip.GzipFile(
+            fileobj=handle, mode='wb', compresslevel=9, filename='', mtime=0,
+        ) as stream:
+            shutil.copyfileobj(raw, stream, 1024 * 1024)
+    return compressed
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as handle:
@@ -176,6 +199,11 @@ def main():
         help='comma separated: settlements, streets, addresses. Settlements '
              'and streets ship together; addresses is a separate release.')
     parser.add_argument('--descriptor', help='write a JSON descriptor here')
+    parser.add_argument(
+        '--compress', action='store_true',
+        help='gzip the index and describe both forms. The device verifies the '
+             'download against sha256, then expands and verifies the result '
+             'against uncompressedSha256.')
     args = parser.parse_args()
 
     tiers = {t.strip() for t in args.tiers.split(',') if t.strip()}
@@ -198,27 +226,46 @@ def main():
     if not rows:
         sys.exit(f'ERROR: {args.input} produced no searchable records.')
 
-    exact_bytes = _write_index(args.output, rows)
-    checksum = _sha256(args.output)
+    plain_bytes = _write_index(args.output, rows)
+    plain_checksum = _sha256(args.output)
 
     print(f'  settlements {len(extractor.settlements):>9,}')
     print(f'  streets     {len(extractor.streets):>9,}')
     print(f'  addresses   {len(extractor.addresses):>9,}')
-    print(f'  index       {exact_bytes / 1e6:>9.2f} MB  {checksum[:12]}')
+    print(f'  index       {plain_bytes / 1e6:>9.2f} MB  {plain_checksum[:12]}')
+
+    # What the device downloads and what it stores are different sizes once
+    # the payload is compressed, and it needs both: the first to show transfer
+    # progress and verify the download, the second to decide beforehand
+    # whether the phone has room for the expanded index.
+    shipped = args.output
+    exact_bytes, checksum = plain_bytes, plain_checksum
+    if args.compress:
+        shipped = _compress(args.output)
+        exact_bytes = os.path.getsize(shipped)
+        checksum = _sha256(shipped)
+        os.remove(args.output)
+        print(f'  gzipped     {exact_bytes / 1e6:>9.2f} MB  {checksum[:12]}'
+              f'  ({exact_bytes / plain_bytes * 100:.0f}% of raw)')
 
     if args.descriptor:
+        descriptor = {
+            'schemaVersion': SCHEMA_VERSION,
+            'regionId': args.region_id,
+            'version': args.version,
+            'format': 'sqlite-fts5',
+            'tiers': sorted(tiers),
+            'file': os.path.basename(shipped),
+            'recordCount': len(rows),
+            'exactBytes': exact_bytes,
+            'sha256': checksum,
+        }
+        if args.compress:
+            descriptor['compression'] = 'gzip'
+            descriptor['uncompressedBytes'] = plain_bytes
+            descriptor['uncompressedSha256'] = plain_checksum
         with open(args.descriptor, 'w', encoding='utf-8') as handle:
-            json.dump({
-                'schemaVersion': SCHEMA_VERSION,
-                'regionId': args.region_id,
-                'version': args.version,
-                'format': 'sqlite-fts5',
-                'tiers': sorted(tiers),
-                'file': os.path.basename(args.output),
-                'recordCount': len(rows),
-                'exactBytes': exact_bytes,
-                'sha256': checksum,
-            }, handle, indent=2, sort_keys=True)
+            json.dump(descriptor, handle, indent=2, sort_keys=True)
     return 0
 
 
