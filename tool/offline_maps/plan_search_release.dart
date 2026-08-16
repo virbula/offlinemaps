@@ -1,0 +1,299 @@
+/// Plans one offline search release from an already-discovered routing manifest.
+///
+/// Search reuses the routing manifest rather than resolving Geofabrik itself.
+/// That manifest already carries what this needs -- a date-pinned extract URL,
+/// its exact byte count and its MD5 -- and it resolves them through matching
+/// that took a great deal of care to get right. Geofabrik's own ISO metadata
+/// cannot be trusted for this: no feature in index-v1.json declares SA at all,
+/// Singapore hides inside malaysia-singapore-brunei, which advertises only MY,
+/// and Kosovo has an extract with no country code. Matching on those fields
+/// alone silently loses whole countries, so this consumes the resolved answer
+/// instead of recomputing it.
+///
+/// Indexes are built per graph, not per region. The 549 catalog regions map to
+/// 297 distinct extracts, so per-region work would download and parse the same
+/// PBF repeatedly. Every region sharing an extract points at the one index
+/// built from it.
+///
+/// Two tiers, two releases, sized by measurement rather than estimate:
+///   places      settlements + streets, about 5% of the map it accompanies,
+///               so it ships by default
+///   addresses   house numbers, larger than the map itself, so it is a
+///               separate opt-in release
+library;
+
+import 'dart:convert';
+import 'dart:io';
+
+import 'release_model.dart';
+
+/// Hard per-shard ceiling, set by the runner rather than by preference.
+///
+/// The largest extract is France at 5.0 GB and none exceed 10 GB, because
+/// Geofabrik already splits the US and Canada per state and province. A
+/// standard ubuntu-24.04 runner has roughly 14 GB free before reclamation, so
+/// a shard bounded to 12 GB of source always fits. This is what lets search
+/// run entirely on hosted runners; POI needs the self-hosted machine only
+/// because its Protomaps source has no such split.
+const int maximumSearchShardSourceBytes = 12 * 1024 * 1024 * 1024;
+
+/// Default shard size, chosen for wall-clock rather than for tidiness.
+///
+/// Packing 86 GiB into as few shards as possible yields 8 jobs of 12 GB each,
+/// which is the slowest arrangement that fits: the matrix runs far below the
+/// available concurrency and every job serially downloads and parses its whole
+/// allocation. Four GiB produces roughly twenty jobs, which saturates a
+/// standard runner allowance and cuts the critical path to the single largest
+/// extract. Sources above this size still get a shard to themselves.
+const int defaultSearchShardSourceBytes = 4 * 1024 * 1024 * 1024;
+
+/// Upper bound on one extract. Anything larger cannot be sharded around.
+const int maximumSearchSourceBytes = 10 * 1024 * 1024 * 1024;
+
+const Set<String> searchTiers = <String>{'places', 'addresses'};
+
+/// Ratio of index bytes to source bytes, from a full Luxembourg build:
+/// a 45.2 MB extract produced a 0.68 MB places index and a 16.7 MB address
+/// index. Used only to project release size, never to gate a build.
+const double placesIndexSourceRatio = 0.015;
+const double addressIndexSourceRatio = 0.37;
+
+Future<void> main(List<String> arguments) async {
+  try {
+    final values = <String, String>{};
+    for (var index = 0; index < arguments.length; index += 2) {
+      if (index + 1 >= arguments.length || !arguments[index].startsWith('--')) {
+        throw const AutomationException(
+          'Every search planning option requires a value.',
+        );
+      }
+      values[arguments[index]] = arguments[index + 1];
+    }
+    String required(String key) =>
+        values[key] ?? (throw AutomationException('$key is required.'));
+    await planSearchRelease(
+      manifestFile: File(required('--manifest')),
+      outputDirectory: Directory(required('--output-dir')),
+      tier: required('--tier'),
+      version: required('--version'),
+      maximumShardBytes: int.parse(
+        values['--max-shard-bytes'] ?? '$defaultSearchShardSourceBytes',
+      ),
+    );
+  } on AutomationException catch (error) {
+    stderr.writeln('Search planning failed: ${error.message}');
+    exitCode = 2;
+  }
+}
+
+Future<void> planSearchRelease({
+  required File manifestFile,
+  required Directory outputDirectory,
+  required String tier,
+  required String version,
+  int maximumShardBytes = defaultSearchShardSourceBytes,
+}) async {
+  if (maximumShardBytes <= 0 ||
+      maximumShardBytes > maximumSearchShardSourceBytes) {
+    throw AutomationException(
+      'A shard may carry at most $maximumSearchShardSourceBytes source bytes.',
+    );
+  }
+  if (!searchTiers.contains(tier)) {
+    throw AutomationException(
+      'Unknown search tier "$tier"; expected one of ${searchTiers.join(', ')}.',
+    );
+  }
+  if (!RegExp(r'^\d{4}\.\d{2}\.\d+$').hasMatch(version)) {
+    throw AutomationException(
+      'Search version "$version" must look like 2026.08.1.',
+    );
+  }
+
+  final manifest = await readJsonObject(manifestFile);
+  final dataset = manifest['routingDataset'];
+  if (dataset is! Map<String, Object?>) {
+    throw const AutomationException(
+      'The manifest has no routingDataset; run discover_routing_sources first.',
+    );
+  }
+  final graphs = dataset['graphs'];
+  final regionGraphs = dataset['regionGraphs'];
+  if (graphs is! Map<String, Object?> || graphs.isEmpty) {
+    throw const AutomationException(
+      'The manifest carries no resolved graphs; search cannot be planned.',
+    );
+  }
+  if (regionGraphs is! Map<String, Object?> || regionGraphs.isEmpty) {
+    throw const AutomationException(
+      'The manifest carries no region-to-graph mapping.',
+    );
+  }
+
+  // Which regions each extract serves. Every region sharing an extract will
+  // reference the single index built from it.
+  final regionsByGraph = <String, List<String>>{};
+  for (final entry in regionGraphs.entries) {
+    final graphId = entry.value;
+    if (graphId is! String || !graphs.containsKey(graphId)) {
+      throw AutomationException(
+        'Region ${entry.key} maps to unknown graph "$graphId".',
+      );
+    }
+    regionsByGraph.putIfAbsent(graphId, () => <String>[]).add(entry.key);
+  }
+  for (final regions in regionsByGraph.values) {
+    regions.sort();
+  }
+
+  final indexes = <Map<String, Object?>>[];
+  final graphIds = graphs.keys.toList()..sort();
+  var projectedBytes = 0;
+  for (final graphId in graphIds) {
+    final graph = graphs[graphId];
+    if (graph is! Map<String, Object?>) {
+      throw AutomationException('Graph $graphId is malformed.');
+    }
+    final url = graph['url'];
+    final exactBytes = graph['exactBytes'];
+    final md5 = graph['md5'];
+    if (url is! String || exactBytes is! int || md5 is! String) {
+      throw AutomationException('Graph $graphId is missing a pinned source.');
+    }
+    // The source must already be pinned to a dated snapshot. A -latest URL
+    // would make the release unreproducible: the same plan would silently
+    // build different data on a rerun.
+    final parsed = Uri.tryParse(url);
+    if (parsed == null ||
+        parsed.scheme != 'https' ||
+        parsed.host != 'download.geofabrik.de' ||
+        !RegExp(r'-\d{6}\.osm\.pbf$').hasMatch(parsed.path)) {
+      throw AutomationException(
+        'Graph $graphId has an unpinned or untrusted source: $url',
+      );
+    }
+    if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(md5)) {
+      throw AutomationException('Graph $graphId has an invalid MD5.');
+    }
+    if (exactBytes <= 0 || exactBytes > maximumSearchSourceBytes) {
+      throw AutomationException(
+        'Graph $graphId source is $exactBytes bytes, outside the buildable '
+        'range; it cannot be split across shards.',
+      );
+    }
+    final regionIds = regionsByGraph[graphId];
+    if (regionIds == null || regionIds.isEmpty) {
+      // An extract no region uses would cost a download and serve nobody.
+      continue;
+    }
+    projectedBytes +=
+        (exactBytes *
+                (tier == 'places'
+                    ? placesIndexSourceRatio
+                    : addressIndexSourceRatio))
+            .round();
+    indexes.add(<String, Object?>{
+      'graphId': graphId,
+      'file': 'search-$tier-$graphId-$version.sqlite',
+      'sourceUrl': url,
+      'sourceBytes': exactBytes,
+      'sourceMd5': md5,
+      'regionIds': regionIds,
+    });
+  }
+  if (indexes.isEmpty) {
+    throw const AutomationException('The plan resolved no search indexes.');
+  }
+
+  // Pack shards by source bytes, not by count. Sizes span three orders of
+  // magnitude -- Vatican-scale extracts next to France at 5 GB -- so an
+  // even split by count would put several large extracts on one runner and
+  // exhaust its disk while other runners idle.
+  final shards = <List<Map<String, Object?>>>[];
+  final shardBytes = <int>[];
+  final ordered = [...indexes]
+    ..sort(
+      (left, right) =>
+          (right['sourceBytes']! as int).compareTo(left['sourceBytes']! as int),
+    );
+  for (final index in ordered) {
+    final bytes = index['sourceBytes']! as int;
+    var placed = false;
+    for (var slot = 0; slot < shards.length; slot++) {
+      if (shardBytes[slot] + bytes <= maximumShardBytes) {
+        shards[slot].add(index);
+        shardBytes[slot] += bytes;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      shards.add(<Map<String, Object?>>[index]);
+      shardBytes.add(bytes);
+    }
+  }
+  // GitHub refuses a matrix larger than 256 jobs.
+  if (shards.length > 256) {
+    throw AutomationException(
+      '${shards.length} shards exceeds the 256-job matrix limit.',
+    );
+  }
+
+  final include = <Map<String, Object?>>[];
+  for (var slot = 0; slot < shards.length; slot++) {
+    final shard = shards[slot]
+      ..sort(
+        (left, right) =>
+            (left['graphId']! as String).compareTo(right['graphId']! as String),
+      );
+    include.add(<String, Object?>{
+      'shard': slot.toString().padLeft(3, '0'),
+      'graphIds': [for (final index in shard) index['graphId']],
+    });
+  }
+
+  final releaseTag = tier == 'places'
+      ? 'search-$version'
+      : 'search-addresses-$version';
+  final plan = <String, Object?>{
+    'schemaVersion': 1,
+    'tier': tier,
+    'version': version,
+    'releaseTag': releaseTag,
+    'indexCount': indexes.length,
+    'regionCount': regionGraphs.length,
+    'shardCount': shards.length,
+    'totalSourceBytes': indexes.fold<int>(
+      0,
+      (sum, i) => sum + (i['sourceBytes']! as int),
+    ),
+    'projectedIndexBytes': projectedBytes,
+    'indexes': indexes,
+  };
+
+  if (!outputDirectory.existsSync()) {
+    outputDirectory.createSync(recursive: true);
+  }
+  const encoder = JsonEncoder.withIndent('  ');
+  File(
+    '${outputDirectory.path}/search-plan.json',
+  ).writeAsStringSync('${encoder.convert(plan)}\n');
+  File(
+    '${outputDirectory.path}/matrix.json',
+  ).writeAsStringSync('${jsonEncode(<String, Object?>{'include': include})}\n');
+
+  stdout
+    ..writeln('  tier            $tier')
+    ..writeln('  release         $releaseTag')
+    ..writeln('  indexes         ${indexes.length}')
+    ..writeln('  regions served  ${regionGraphs.length}')
+    ..writeln('  shards          ${shards.length}')
+    ..writeln(
+      '  source total    '
+      '${(plan['totalSourceBytes']! as int) ~/ (1024 * 1024 * 1024)} GiB',
+    )
+    ..writeln(
+      '  projected index '
+      '${projectedBytes ~/ (1024 * 1024)} MiB',
+    );
+}
