@@ -111,7 +111,7 @@ Future<void> main(List<String> arguments) async {
       ),
       geofabrikParents: values['--geofabrik-index'] == null
           ? const <String, String>{}
-          : _parentsFromIndex(File(values['--geofabrik-index']!)),
+          : parentsFromIndex(File(values['--geofabrik-index']!)),
       sourceDate: values['--source-date'] ?? '',
     );
   } on AutomationException catch (error) {
@@ -125,15 +125,41 @@ Future<void> main(List<String> arguments) async {
 /// Only the parent is taken from the index. Which feature belongs to which
 /// country is decided by [countryPbfFeatureIds], because the index's country
 /// codes are incomplete.
-Map<String, String> _parentsFromIndex(File file) {
+Map<String, String> parentsFromIndex(File file) {
   final decoded = jsonDecode(file.readAsStringSync());
-  final features = (decoded as Map<String, Object?>)['features']! as List;
-  return <String, String>{
-    for (final feature in features.cast<Map<String, Object?>>())
-      (feature['properties']! as Map<String, Object?>)['id']! as String:
-          ((feature['properties']! as Map<String, Object?>)['parent'] ?? '')
-              as String,
-  };
+  if (decoded is! Map<String, Object?>) {
+    throw AutomationException('${file.path} is not a JSON object.');
+  }
+  // Two shapes reach this. Geofabrik serves bare GeoJSON with features at the
+  // top level, but discover_routing_sources.dart caches it wrapped in
+  // provenance -- {schemaVersion, version, generatedAt, index} -- so it can
+  // tell a stale cache from a current one, and the workflow passes that cached
+  // copy. Reading the wrapper as if it were the index found no features and
+  // died on a null check, which is how the country build failed at prepare
+  // before any of it had run.
+  final root = decoded['index'] is Map<String, Object?>
+      ? decoded['index']! as Map<String, Object?>
+      : decoded;
+  final features = root['features'];
+  if (features is! List) {
+    throw AutomationException(
+      '${file.path} has no features array. Top-level keys: '
+      '${root.keys.join(", ")}.',
+    );
+  }
+  final parents = <String, String>{};
+  for (final feature in features) {
+    if (feature is! Map<String, Object?>) continue;
+    final properties = feature['properties'];
+    if (properties is! Map<String, Object?>) continue;
+    final id = properties['id'];
+    if (id is! String) continue;
+    parents[id] = (properties['parent'] as String?) ?? '';
+  }
+  if (parents.isEmpty) {
+    throw AutomationException('${file.path} yielded no feature ids.');
+  }
+  return parents;
 }
 
 Future<void> planSearchRelease({

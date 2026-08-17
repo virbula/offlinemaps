@@ -291,4 +291,102 @@ void main() {
       );
     }
   });
+
+  /// The country-index path, which had no coverage at all and shipped broken.
+  ///
+  /// It failed on its first real run: the workflow passes the index that
+  /// discover_routing_sources.dart cached, and that file wraps the GeoJSON in
+  /// provenance rather than being the GeoJSON. Reading it as if it were bare
+  /// found no features and died on a null check, before a single country had
+  /// been planned.
+  group('parentsFromIndex', () {
+    Future<File> index(Object? value) async {
+      final directory = await workspace();
+      final file = File('${directory.path}/geofabrik-index.json');
+      await file.writeAsString(jsonEncode(value));
+      return file;
+    }
+
+    Map<String, Object?> geojson() => <String, Object?>{
+      'type': 'FeatureCollection',
+      'features': <Object?>[
+        <String, Object?>{
+          'properties': <String, Object?>{'id': 'us', 'parent': 'north-america'},
+        },
+        // Continent-level extracts carry no parent, so absent must read as
+        // empty rather than throwing.
+        <String, Object?>{
+          'properties': <String, Object?>{'id': 'europe'},
+        },
+      ],
+    };
+
+    test('reads the bare GeoJSON Geofabrik serves', () async {
+      final parents = parentsFromIndex(await index(geojson()));
+      expect(parents['us'], 'north-america');
+      expect(parents['europe'], '');
+    });
+
+    test('reads the provenance-wrapped copy the workflow passes', () async {
+      // The shape that broke the build.
+      final parents = parentsFromIndex(
+        await index(<String, Object?>{
+          'schemaVersion': 1,
+          'version': '1',
+          'generatedAt': 'now',
+          'index': geojson(),
+        }),
+      );
+      expect(parents['us'], 'north-america');
+      expect(parents['europe'], '');
+    });
+
+    test('says what is wrong instead of a null check', () async {
+      // A null check operator failure names a file and a line number and
+      // nothing about the cause, which cost a whole prepare run to diagnose.
+      final file = await index(<String, Object?>{
+        'schemaVersion': 1,
+        'version': '1',
+      });
+      expect(
+        () => parentsFromIndex(file),
+        throwsA(
+          isA<AutomationException>().having(
+            (error) => error.message,
+            'message',
+            allOf(contains('no features array'), contains('schemaVersion')),
+          ),
+        ),
+      );
+    });
+
+    test('an index with features but no usable ids is refused', () async {
+      // Silently returning an empty map would leave every country index
+      // without a parent path and produce unresolvable source URLs.
+      final file = await index(<String, Object?>{
+        'features': <Object?>[
+          <String, Object?>{'properties': <String, Object?>{'name': 'no id'}},
+        ],
+      });
+      expect(
+        () => parentsFromIndex(file),
+        throwsA(isA<AutomationException>()),
+      );
+    });
+
+    test('a malformed feature is skipped rather than fatal', () async {
+      final parents = parentsFromIndex(
+        await index(<String, Object?>{
+          'features': <Object?>[
+            'not an object',
+            <String, Object?>{'properties': 'not a map'},
+            <String, Object?>{
+              'properties': <String, Object?>{'id': 'us', 'parent': 'na'},
+            },
+          ],
+        }),
+      );
+      expect(parents, <String, String>{'us': 'na'});
+    });
+  });
 }
