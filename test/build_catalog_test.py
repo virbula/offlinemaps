@@ -173,6 +173,26 @@ class AttachSearchTest(unittest.TestCase):
         self.assertFalse(bc.attach_search(entry, self.indexes))
         self.assertNotIn('search', entry)
 
+    def test_a_country_aggregate_takes_the_country_index(self):
+        # The aggregate stands for the whole country, so it needs the one index
+        # built from the country PBF -- not an index for one of its extracts,
+        # which is the only thing the per-region mapping could offer it.
+        country = {'id': 'us-country-road', 'logicalRegionId': 'us-country-road',
+                   'scope': 'country', 'countryCode': 'US'}
+        by_country = {'US': {'places': {'file': 'us-country.sqlite.gz'}}}
+        self.assertTrue(bc.attach_search(country, self.indexes, by_country))
+        self.assertEqual(country['search']['places']['file'],
+                         'us-country.sqlite.gz')
+
+    def test_a_country_aggregate_never_borrows_a_region_index(self):
+        # Without a country index it must stay empty rather than silently
+        # advertising one state's index as covering the whole country.
+        country = {'id': 'fr-country-road', 'logicalRegionId': 'fr-country-road',
+                   'scope': 'country', 'countryCode': 'FR'}
+        self.assertFalse(bc.attach_search(country, {'fr-country-road': {
+            'places': {'file': 'fr-one-region.sqlite.gz'}}}, {}))
+        self.assertNotIn('search', country)
+
 
 class ContinentPacksTest(unittest.TestCase):
     """The regression that motivated all of this."""

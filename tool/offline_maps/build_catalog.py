@@ -413,16 +413,56 @@ def search_indexes(generated_at, inputs=None):
     return by_region, found
 
 
-def attach_search(entry, indexes):
+def country_search_indexes(generated_at, inputs=None):
+    """Country-wide search indexes, keyed by country code.
+
+    Separate from [search_indexes] because these are attached to the country
+    aggregate entry rather than to the extracts they were built from. Optional:
+    a cycle can publish the per-extract indexes without the country ones.
+    """
+    path = os.path.join(inputs or INPUTS, 'search-manifest-country.json')
+    if not os.path.exists(path):
+        return {}
+    manifest = load(path)
+    tier = manifest['tier']
+    release = SEARCH_RELEASES[tier]
+    by_country = {}
+    for index in manifest['indexes']:
+        by_country.setdefault(index['countryCode'].upper(), {})[tier] = {
+            'file': index['file'],
+            'downloadUrl': f'{DOWNLOAD}/{release}/{index["file"]}',
+            'version': manifest['version'],
+            'recordCount': index['recordCount'],
+            'exactBytes': index['exactBytes'],
+            'sha256': index['sha256'],
+            'uncompressedBytes': index['uncompressedBytes'],
+            'uncompressedSha256': index['uncompressedSha256'],
+            'compression': index['compression'],
+            'format': index['format'],
+            'tiers': sorted(index['tiers']),
+            'updatedAt': generated_at,
+        }
+    return by_country
+
+
+def attach_search(entry, indexes, country_indexes=None):
     """Puts the search node on one catalog entry, if an index covers it.
 
     Matched on logicalRegionId so the Good and Detailed variants of a region
     both carry it. Search is independent of map zoom -- the same index answers
     either -- so this follows routing, which both variants keep, rather than
     poi, which only the Good entry carries.
+
+    A country aggregate takes the country-wide index instead. Its member
+    extracts each have their own, but the aggregate stands for the whole country
+    and needs one file covering it, which is the reason those indexes are built
+    from the country PBF at all.
     """
-    key = entry.get('logicalRegionId') or entry['id']
-    found = indexes.get(key) or indexes.get(entry['id'])
+    if entry.get('scope') == 'country':
+        found = (country_indexes or {}).get((entry.get('countryCode') or '').upper())
+    else:
+        key = entry.get('logicalRegionId') or entry['id']
+        found = indexes.get(key) or indexes.get(entry['id'])
     if not found:
         return False
     entry['search'] = json.loads(json.dumps(found))
@@ -490,6 +530,14 @@ def main():
                 continue
             regions.append(entry)
             added += 1
+
+    # Search last, so it lands on every entry the join produced: the regional
+    # maps, both quality variants, and the country aggregates.
+    search, search_found = search_indexes(good_catalog['generatedAt'])
+    country_search = country_search_indexes(good_catalog['generatedAt'])
+    searched = sum(
+        1 for entry in regions
+        if attach_search(entry, search, country_search))
 
     packs = continent_packs()
     catalog = {
@@ -566,6 +614,21 @@ def main():
     print(f'unique areaIds   {len(set(areas))}  {"OK" if len(set(areas))==len(areas) else "DUPLICATES"}')
     print(f'with routing     {sum(1 for r in regions if r.get("routing"))}')
     print(f'with poi         {sum(1 for r in regions if r.get("poi"))}')
+    print(f'with search      {searched}  (manifests: {", ".join(search_found)}'
+          f'{f", country ({len(country_search)})" if country_search else ""})')
+    # Deduplicated by file. Summing per entry counts one index once per region
+    # it serves and again for each quality variant, which inflated the total
+    # from 15 GB to 127 GB and made the figure worse than no figure.
+    unique_search = {
+        tier['file']: tier
+        for r in regions for tier in (r.get('search') or {}).values()
+    }
+    if unique_search:
+        dl = sum(t['exactBytes'] for t in unique_search.values())
+        inflated = sum(t['uncompressedBytes'] for t in unique_search.values())
+        print(f'search indexes   {len(unique_search)} distinct files, '
+              f'{dl/1e9:.2f} GB download, {inflated/1e9:.2f} GB installed '
+              f'({inflated/dl:.1f}x)')
     print(f'country names    {sum(1 for r in regions if r.get("scope")=="country" and len(r.get("names",{}))>=8)}/{added} with 8+ locales')
     print(f'minified         {size:,} bytes = {size/1048576:.2f} MiB')
     return 0
