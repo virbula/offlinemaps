@@ -320,9 +320,21 @@ jobs:
             rm -f "$pbf"
 
             test "$(jq -er '.file' "build/search-work/$graph_id.descriptor.json")" = "$out_file"
-            gh release upload "$RELEASE_TAG" "build/search-work/$out_file" \
-              -R "$REPOSITORY" --clobber
-            rm -f "build/search-work/$out_file"
+            # Split indexes ship as independently gzipped parts, like routing
+            # graphs. No per-extract index is near the 2 GiB ceiling today, but
+            # the same code path has to work here or a future cycle silently
+            # fails on whichever extract grows past it first.
+            mapfile -t assets < <(jq -r '
+              if (.parts // []) | length > 0
+              then .parts[].file else .file end' \
+              "build/search-work/$graph_id.descriptor.json")
+            for asset in "${assets[@]}"; do
+              test -f "build/search-work/$asset" || {
+                echo "ERROR: missing build/search-work/$asset" >&2; exit 1; }
+              gh release upload "$RELEASE_TAG" "build/search-work/$asset" \
+                -R "$REPOSITORY" --clobber
+              rm -f "build/search-work/$asset"
+            done
             echo "::endgroup::"
           done
 

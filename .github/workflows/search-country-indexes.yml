@@ -164,8 +164,13 @@ jobs:
           # missing. Waiting also keeps the two builds off the same runners.
           tag="$(jq -er '.releaseTag' build/search-plan/search-plan.json)"
           want="$(jq -r '.indexCount' build/search-plan/search-plan.json)"
+          # Distinct indexes, so a split one counts once rather than once per
+          # part. Stripping any .partNNN suffix before deduplicating means this
+          # keeps working whichever form the per-extract build produced.
           got="$(gh release view "$tag" -R "${{ github.repository }}" \
-            --json assets --jq '[.assets[]|select(.name|endswith(".sqlite.gz"))]|length')"
+            --json assets --jq '[.assets[].name
+                   | select(test("\\.sqlite\\.gz(\\.part[0-9]{3})?$"))
+                   | sub("\\.part[0-9]{3}$"; "")] | unique | length')"
           echo "  $got of $want per-extract indexes present on $tag"
           test "$got" -ge "$want"
 
@@ -254,9 +259,23 @@ jobs:
             --descriptor "build/$COUNTRY.descriptor.json"
           rm -f "$pbf"
           test "$(jq -er '.file' "build/$COUNTRY.descriptor.json")" = "$OUT_FILE"
-          gh release upload "$RELEASE_TAG" "build/$OUT_FILE" \
-            -R "$REPOSITORY" --clobber
-          rm -rf build/country "build/$OUT_FILE"
+          # A country index can exceed GitHub's 2 GiB asset ceiling -- the US
+          # address index is projected between 1.27 and 1.96 GB -- so the builder
+          # splits anything over 1900 MiB uncompressed into independently
+          # gzipped parts, the same way routing graphs ship. Upload whichever
+          # form it produced; the descriptor says which.
+          mapfile -t assets < <(jq -r '
+            if (.parts // []) | length > 0
+            then .parts[].file else .file end' "build/$COUNTRY.descriptor.json")
+          test "${#assets[@]}" -ge 1
+          echo "  uploading ${#assets[@]} asset(s) for $COUNTRY"
+          for asset in "${assets[@]}"; do
+            test -f "build/$asset" || { echo "ERROR: missing build/$asset" >&2; exit 1; }
+            gh release upload "$RELEASE_TAG" "build/$asset" \
+              -R "$REPOSITORY" --clobber
+            rm -f "build/$asset"
+          done
+          rm -rf build/country
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -285,8 +304,14 @@ jobs:
       - name: Require every country index to be present
         run: |
           set -euo pipefail
+          # Counts distinct countries, not assets. A split index arrives as
+          # .sqlite.gz.part001, .part002 and so on, so counting names ending in
+          # .sqlite.gz would report a country as missing when it is present in
+          # several pieces -- failing the run after every shard had succeeded.
           got="$(gh release view "$RELEASE_TAG" -R "$REPOSITORY" --json assets \
-            --jq '[.assets[]|select(.name|test("-country-[0-9]{4}\\.[0-9]{2}\\.[0-9]+\\.sqlite\\.gz$"))]|length')"
+            --jq '[.assets[].name
+                   | capture("-(?<cc>[a-z]{2})-country-[0-9]{4}\\.[0-9]{2}\\.[0-9]+\\.sqlite\\.gz(\\.part[0-9]{3})?$")
+                   | .cc] | unique | length')"
           echo "  $got of $EXPECTED country indexes on $RELEASE_TAG"
           test "$got" = "$EXPECTED"
 

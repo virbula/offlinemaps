@@ -430,6 +430,68 @@ def _compress(path):
     return compressed
 
 
+# 1900 MiB, cut on the uncompressed side, matching recompress_routing_release.py
+# exactly. Two reasons to reuse the routing number rather than pick one:
+#
+# A GitHub release asset cannot exceed 2 GiB, and cutting the *uncompressed*
+# stream well below that guarantees every compressed part clears the ceiling
+# without having to compress the whole index first to find out -- which for a
+# 20 GB index would mean compressing it twice.
+#
+# Smaller parts are also better downloads regardless of the limit: a failed
+# transfer costs one part rather than the whole index, and resume restarts at a
+# part boundary. Routing parts land at 827 MB at the largest, which is the size
+# this produces from real data.
+PART_BYTES = 1992294400
+
+
+def _split_and_compress(path, target_bytes=PART_BYTES):
+    """Splits the index into chunks and gzips each one independently.
+
+    Split first, then compress each piece -- not compress then cut. Each part is
+    then its own gzip member, which buys two properties the app already relies
+    on for routing graphs: a part inflates on its own, so a download resumes at a
+    part boundary instead of restarting, and the concatenation of all parts is
+    still one valid gzip stream, so the whole index can be inflated in a single
+    pass while it is being assembled.
+
+    Cutting a finished gzip stream into pieces would give neither: no part but
+    the first could be inflated alone, and nothing could be verified until every
+    part had arrived.
+    """
+    parts = []
+    with open(path, 'rb') as raw:
+        while True:
+            index = len(parts) + 1
+            target = f'{path}.gz.part{index:03d}'
+            written = 0
+            # Both digests, per part. The compressed one authenticates the
+            # transfer; the inflated one authenticates what is written to disk,
+            # and is what lets a resumed download verify the part it already has
+            # without re-fetching it.
+            plain_digest = hashlib.sha256()
+            with open(target, 'wb') as handle:
+                with gzip.GzipFile(
+                    fileobj=handle, mode='wb', compresslevel=9,
+                    filename='', mtime=0,
+                ) as stream:
+                    while written < target_bytes:
+                        chunk = raw.read(min(1024 * 1024, target_bytes - written))
+                        if not chunk:
+                            break
+                        stream.write(chunk)
+                        plain_digest.update(chunk)
+                        written += len(chunk)
+            if written == 0:
+                # Nothing left; the file just opened holds an empty member.
+                os.remove(target)
+                break
+            parts.append((target, written, plain_digest.hexdigest()))
+            if written < target_bytes:
+                break
+    return parts
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as handle:
@@ -525,13 +587,38 @@ def main():
     # whether the phone has room for the expanded index.
     shipped = args.output
     exact_bytes, checksum = plain_bytes, plain_checksum
+    part_records = []
     if args.compress:
-        shipped = _compress(args.output)
-        exact_bytes = os.path.getsize(shipped)
-        checksum = _sha256(shipped)
+        # Decided on the uncompressed size, so a large index is compressed once
+        # rather than compressed whole and then discarded and redone in parts.
+        if plain_bytes <= PART_BYTES:
+            shipped = _compress(args.output)
+            exact_bytes = os.path.getsize(shipped)
+            checksum = _sha256(shipped)
+            print(f'  gzipped     {exact_bytes / 1e6:>9.2f} MB  {checksum[:12]}'
+                  f'  ({exact_bytes / plain_bytes * 100:.0f}% of raw)')
+        else:
+            shipped = f'{args.output}.gz'
+            parts = _split_and_compress(args.output)
+            exact_bytes = 0
+            for path, plain_part_bytes, plain_part_sha in parts:
+                size = os.path.getsize(path)
+                exact_bytes += size
+                part_records.append({
+                    'file': os.path.basename(path),
+                    'exactBytes': size,
+                    'sha256': _sha256(path),
+                    'uncompressedBytes': plain_part_bytes,
+                    'uncompressedSha256': plain_part_sha,
+                })
+            checksum = None
+            print(f'  gzipped     {exact_bytes / 1e6:>9.2f} MB across '
+                  f'{len(parts)} parts  '
+                  f'({exact_bytes / plain_bytes * 100:.0f}% of raw)')
+            print(f'  split       {plain_bytes / 1e9:.2f} GB uncompressed '
+                  f'exceeds the {PART_BYTES / 1e9:.2f} GB part size; largest '
+                  f'part {max(os.path.getsize(p) for p, _, _ in parts) / 1e6:.0f} MB')
         os.remove(args.output)
-        print(f'  gzipped     {exact_bytes / 1e6:>9.2f} MB  {checksum[:12]}'
-              f'  ({exact_bytes / plain_bytes * 100:.0f}% of raw)')
 
     if args.descriptor:
         descriptor = {
@@ -543,12 +630,18 @@ def main():
             'file': os.path.basename(shipped),
             'recordCount': record_count,
             'exactBytes': exact_bytes,
-            'sha256': checksum,
         }
+        if checksum is not None:
+            descriptor['sha256'] = checksum
         if args.compress:
             descriptor['compression'] = 'gzip'
             descriptor['uncompressedBytes'] = plain_bytes
             descriptor['uncompressedSha256'] = plain_checksum
+        if part_records:
+            # The whole-asset sha256 is deliberately omitted for a split index:
+            # no such asset exists to verify. The device authenticates each part
+            # on arrival and the inflated whole against uncompressedSha256.
+            descriptor['parts'] = part_records
         with open(args.descriptor, 'w', encoding='utf-8') as handle:
             json.dump(descriptor, handle, indent=2, sort_keys=True)
     return 0
