@@ -191,20 +191,28 @@ jobs:
       - name: Require every graph to have arrived
         run: |
           set -euo pipefail
-          # By release id, not by tag. A draft has no git tag behind it, so
-          # releases/tags/<tag> returns 404 for one -- and the target is a
-          # draft until it is deliberately published, which is exactly when
-          # this check runs. Cost a false failure after all 11 shards had
-          # already succeeded.
-          rid="$(gh api "repos/$REPOSITORY/releases" --paginate \
-            --jq ".[]|select(.tag_name==\"$TARGET\")|.id")"
-          test -n "$rid"
+          # By release id, not by tag, for both releases. A draft has no git
+          # tag behind it, so releases/tags/<tag> returns 404 for one. The
+          # target is a draft until it is deliberately published, which is
+          # exactly when this check runs, and the source can be a draft too --
+          # routing-continents-2026.08.1 was. Cost a false failure after all 11
+          # shards had already succeeded and every asset was uploaded.
+          ids="$(gh api "repos/$REPOSITORY/releases" --paginate \
+            --jq '[.[]|{key:.tag_name,value:.id}]|from_entries')"
+          rid="$(jq -er --arg t "$TARGET" '.[$t]' <<< "$ids")"
+          sid="$(jq -er --arg t "$SOURCE" '.[$t]' <<< "$ids")"
           got="$(gh api "repos/$REPOSITORY/releases/$rid/assets?per_page=100" \
             --paginate --jq '.[]|select(.name|endswith("descriptor.json"))|.name' | wc -l | tr -d ' ')"
           echo "  descriptors: $got of $EXPECTED"
           test "$got" = "$EXPECTED"
-          before="$(gh api "repos/$REPOSITORY/releases/tags/$SOURCE" \
-            --jq '[.assets[]|select(.name|test("\\.vtiles\\.tar(\\.part[0-9]{3})?$")).size]|add')"
+          # Assets via the paginated endpoint, matching the target lookup
+          # above. The release object does embed its whole asset list today,
+          # 737 of them on the regional release, so this is not fixing an
+          # undercount -- it just does not rely on that holding for a release
+          # this size.
+          before="$(gh api "repos/$REPOSITORY/releases/$sid/assets?per_page=100" \
+            --paginate --jq '.[]|select(.name|test("\\.vtiles\\.tar(\\.part[0-9]{3})?$"))|.size' \
+            | paste -sd+ - | bc)"
           after="$(gh api "repos/$REPOSITORY/releases/$rid/assets?per_page=100" \
             --paginate --jq '.[]|select(.name|test("\\.gz(\\.part[0-9]{3})?$"))|.size' \
             | paste -sd+ - | bc)"
