@@ -1,0 +1,204 @@
+name: Recompress routing graphs
+
+# Republishes routing graphs gzipped, without rebuilding any of them.
+#
+# Valhalla graphs are raw packed structs with no internal compression and
+# measure 37-40% gzipped, so shipping them raw costs nearly three times the
+# bytes. For routing-2026.08.1 that is 137 GB becoming roughly 52 GB.
+#
+# GitHub cannot compress an asset in place: release assets are immutable blobs,
+# so the only route is download, transform, re-upload. Doing that here rather
+# than on a workstation spends runner bandwidth instead of someone's, and
+# parallelises across shards.
+#
+# Nothing is rebuilt. Each archive is reassembled from its published parts and
+# verified against its SHA-256 before compression, and the descriptor records
+# that original hash as uncompressedSha256, so the graph is provably the same
+# one. A ten-hour continent build is not repeated to change its packaging.
+#
+# PMTiles is deliberately excluded: it already gzips every tile, measured 99%,
+# and whole-archive compression would break the byte-range reads the renderer
+# depends on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Release holding the uncompressed graphs
+        required: true
+        type: string
+        default: routing-2026.08.1
+      target_tag:
+        description: >-
+          Release to publish compressed graphs into. Keep the cycle and record
+          the repackaging in a suffix, e.g. routing-2026.08.1-r2, so the
+          version does not drift away from the rest of the cycle.
+        required: true
+        type: string
+        default: routing-2026.08.1-r2
+      max_shard_bytes:
+        description: Source bytes per shard
+        required: true
+        type: string
+        default: '12884901888'
+      dry_run:
+        description: Plan only, upload nothing
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: offlinemaps-recompress-${{ inputs.target_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a trusted manual run
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE: ${{ inputs.source_tag }}
+          TARGET: ${{ inputs.target_tag }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_NAME" = workflow_dispatch
+          test "$REPOSITORY" = virbula/offlinemaps
+          [[ "$SOURCE" =~ ^routing(-continents)?-[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]
+          [[ "$TARGET" =~ ^routing(-continents)?-[0-9]{4}\.[0-9]{2}\.[0-9]+(-r[0-9]+)?$ ]]
+          # Overwriting the source would destroy the only uncompressed copy
+          # before anything has verified the compressed one.
+          test "$SOURCE" != "$TARGET"
+
+  prepare:
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      graph_count: ${{ steps.plan.outputs.graph_count }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE: ${{ inputs.source_tag }}
+      TARGET: ${{ inputs.target_tag }}
+      MAX_SHARD: ${{ inputs.max_shard_bytes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plan the shards
+        id: plan
+        run: |
+          set -euo pipefail
+          python3 tool/offline_maps/recompress_routing_release.py \
+            --repository "$REPOSITORY" \
+            --source-tag "$SOURCE" --target-tag "$TARGET" \
+            --max-shard-bytes "$MAX_SHARD" \
+            --plan-shards matrix.json
+          jq -e '.include|length >= 1 and length <= 256' matrix.json >/dev/null
+          jq -e 'all(.include[]; (.shard|test("^[0-9]{3}$")) and (.graphs|length > 0))' \
+            matrix.json >/dev/null
+          count="$(jq -r '[.include[].graphs|split(",")|length]|add' matrix.json)"
+          printf 'matrix=%s\ngraph_count=%s\n' "$(jq -c . matrix.json)" "$count" >> "$GITHUB_OUTPUT"
+          jq -r '.include[]|"  shard \(.shard)  \(.sourceBytes/1000000000*10|floor/10) GB  \(.graphs|split(",")|length) graphs"' matrix.json
+
+      - name: Create the draft release
+        if: inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TARGET" -R "$REPOSITORY" >/dev/null 2>&1; then
+            # Never --latest: that flag serves the app's catalog URL, and a
+            # routing release taking it would point every client at a release
+            # with no catalog.json in it.
+            gh release create "$TARGET" -R "$REPOSITORY" --draft --latest=false \
+              --title "Virbula Offline Map - Routing graphs gzipped ${TARGET#routing-}" \
+              --notes "Routing graphs from $SOURCE, repackaged with gzip transport compression.
+
+          Recompressed rather than rebuilt: each archive was reassembled from its published parts and verified against its SHA-256 before compression, so the data version is unchanged and the suffix records the repackaging alone.
+
+          Parts are split first and gzipped individually, so each is an independent gzip member. The concatenation is still one valid stream, but the device can also inflate each part as it arrives, append it, verify it and delete it - which keeps peak disk to the expanded archive plus one part, and lets an interrupted download resume at a part boundary.
+
+          Every descriptor carries both sizes and both checksums, whole archive and per part, so the app can report transfer size and installed size separately and verify each stage."
+          fi
+
+  build:
+    needs: prepare
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix).include }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE: ${{ inputs.source_tag }}
+      TARGET: ${{ inputs.target_tag }}
+      GRAPHS: ${{ matrix.graphs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reclaim runner disk
+        run: |
+          set -euo pipefail
+          # A shard holds its sources plus the compressed result. The largest
+          # is a single 20 GB graph, so a stock runner's ~14 GB is not enough.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h / | awk 'NR==2 {print "  free after reclaim: " $4}'
+
+      - name: Recompress this shard
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          python3 tool/offline_maps/recompress_routing_release.py \
+            --repository "$REPOSITORY" \
+            --source-tag "$SOURCE" --target-tag "$TARGET" \
+            --graphs "$GRAPHS" --work-dir work
+          # The tool deletes each graph as it finishes; anything left means a
+          # partial run that would otherwise pass silently.
+          test -z "$(find work -name '*.tar*' -print -quit)"
+
+  finalize:
+    needs: [prepare, build]
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE: ${{ inputs.source_tag }}
+      TARGET: ${{ inputs.target_tag }}
+      EXPECTED: ${{ needs.prepare.outputs.graph_count }}
+    steps:
+      - name: Require every graph to have arrived
+        run: |
+          set -euo pipefail
+          got="$(gh api "repos/$REPOSITORY/releases/tags/$TARGET" \
+            --jq '[.assets[]|select(.name|endswith("descriptor.json"))]|length')"
+          echo "  descriptors: $got of $EXPECTED"
+          test "$got" = "$EXPECTED"
+          before="$(gh api "repos/$REPOSITORY/releases/tags/$SOURCE" \
+            --jq '[.assets[]|select(.name|test("\\.vtiles\\.tar(\\.part[0-9]{3})?$")).size]|add')"
+          after="$(gh api "repos/$REPOSITORY/releases/tags/$TARGET" \
+            --jq '[.assets[]|select(.name|test("\\.gz(\\.part[0-9]{3})?$")).size]|add')"
+          # Kept to one line: inside a YAML block scalar every continuation
+          # must stay indented, so a multi-line -c body breaks the document.
+          python3 -c "b=$before; a=$after; print(f'  {b/1e9:.0f} GB -> {a/1e9:.0f} GB ({a/b*100:.0f}%), {(b-a)/1e9:.0f} GB saved'); raise SystemExit(0 if a < b else 'compression did not reduce the release')"

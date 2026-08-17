@@ -21,6 +21,7 @@ footprint by a factor of nearly three.
 """
 import argparse
 import hashlib
+import re
 import json
 import os
 import shutil
@@ -307,22 +308,79 @@ def recompress(repository, source_tag, target_tag, graph_id, work, dry_run,
     return plain_bytes, exact_bytes
 
 
+def plan_shards(repository, source_tag, max_shard_bytes):
+    """Groups graphs into shards a hosted runner can actually hold.
+
+    Packed by source bytes rather than count: a shard must download its whole
+    allocation, compress it and hold the output, so a shard of ten small
+    countries and one of ten large ones are not interchangeable.
+
+    Runners reclaim to roughly 45 GB, and a shard needs its sources plus about
+    forty percent again for the compressed result, so the default leaves ample
+    headroom rather than sizing to the edge of failure.
+    """
+    out = subprocess.run(
+        ['gh', 'api', f'repos/{repository}/releases/tags/{source_tag}',
+         '--jq', '.assets[]|{name,size}'],
+        capture_output=True, text=True).stdout
+    sizes = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        a = json.loads(line)
+        name = a['name']
+        # Only graph payloads. The release also carries plans, tile-validation
+        # and cross-boundary route reports, which would otherwise register as
+        # phantom graphs with no archive behind them.
+        if not re.search(r'\.vtiles\.tar(\.part\d{3})?$', name):
+            continue
+        # Strip the multipart suffix so every part bills to its graph.
+        base = re.sub(r'\.part\d{3}$', '', name)
+        graph = base.replace('-routing-', '\x00').split('\x00')[0]
+        sizes[graph] = sizes.get(graph, 0) + a['size']
+    shards, totals = [], []
+    for graph, size in sorted(sizes.items(), key=lambda kv: -kv[1]):
+        placed = False
+        for i, t in enumerate(totals):
+            if t + size <= max_shard_bytes:
+                shards[i].append(graph); totals[i] += size; placed = True; break
+        if not placed:
+            shards.append([graph]); totals.append(size)
+    include = [{'shard': f'{i:03d}', 'graphs': ','.join(sorted(s)),
+                'sourceBytes': totals[i]}
+               for i, s in enumerate(shards)]
+    return {'include': include}, sizes
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', default='virbula/offlinemaps')
     parser.add_argument('--source-tag', default='')
     parser.add_argument('--target-tag', required=True)
-    parser.add_argument('--graphs', required=True,
+    parser.add_argument('--graphs', default='',
                         help='comma separated graph ids to recompress')
-    parser.add_argument('--work-dir', required=True)
+    parser.add_argument('--work-dir', default='.')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--local-archive',
                         help='compress this local .tar instead of downloading; '
                              'for a graph that was never published')
+    parser.add_argument('--plan-shards', metavar='PATH',
+                        help='write a sharded build matrix here and exit')
+    parser.add_argument('--max-shard-bytes', type=int, default=12 * 1024**3)
     parser.add_argument('--plan-dir',
                         help='control directory holding <graph>-plan.json, '
                              'its .sha256 and <graph>-sources.json')
     args = parser.parse_args()
+
+    if args.plan_shards:
+        matrix, sizes = plan_shards(
+            args.repository, args.source_tag, args.max_shard_bytes)
+        with open(args.plan_shards, 'w', encoding='utf-8') as handle:
+            json.dump(matrix, handle)
+        total = sum(sizes.values())
+        print(f'  {len(sizes)} graphs, {total/1e9:.0f} GB, '
+              f'{len(matrix["include"])} shards')
+        return 0
 
     os.makedirs(args.work_dir, exist_ok=True)
     graphs = [g.strip() for g in args.graphs.split(',') if g.strip()]
