@@ -287,12 +287,24 @@ def country_entry(cc, scope, quality, names, hashes, multipart, graphs,
 
 
 def continent_packs():
+    """Builds the continent routing packs, requiring all of them.
+
+    A missing descriptor used to be skipped in silence, which is the worst
+    possible handling for a catalog input: the build succeeded, printed a
+    plausible pack count, and shipped a catalog with a continent simply absent.
+    Europe was in exactly that state -- its 33 GB tar sat in output/ with no
+    descriptor beside it, because it went through the recompression path rather
+    than the ordinary build, so a rebuild would have published six continents
+    and no Europe without a word.
+    """
     packs = []
+    missing = []
     for slug, (code, label) in CONTINENT_NAMES.items():
         path = os.path.join(
             CONTINENT_DIR, f'{slug}-continent/output',
             f'{slug}-continent-routing-2026.08.1.vtiles.descriptor.json')
         if not os.path.exists(path):
+            missing.append(slug)
             continue
         d = load(path)
         routing = json.loads(json.dumps(d['routing']))
@@ -310,6 +322,13 @@ def continent_packs():
             'memberRegionIds': sorted(d.get('regionIds', [])),
             'routing': routing,
         })
+    if missing:
+        raise SystemExit(
+            f'continent descriptors missing: {", ".join(sorted(missing))}\n'
+            f'  looked under {CONTINENT_DIR}/<slug>-continent/output/\n'
+            '  Every continent in CONTINENT_NAMES must be present. Publishing '
+            'a catalog without one silently strips continent routing for that '
+            'whole landmass.')
     return packs
 
 
