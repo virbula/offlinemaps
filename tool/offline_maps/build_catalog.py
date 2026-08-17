@@ -304,6 +304,35 @@ def continent_packs():
     return packs
 
 
+def stamp_part_counts(node):
+    """Records how many parts each downloadable asset has.
+
+    The count is derivable from the parts array, but stating it lets the app
+    check what it received against what was promised. A truncated or
+    half-written catalog entry would otherwise look like a smaller download
+    that succeeds, and the user would end up with an archive that cannot be
+    assembled -- discovered only at install time, after gigabytes of transfer.
+
+    Single-file assets get 1 rather than being left absent, so the app has one
+    uniform field to read and no special case for the common path.
+    """
+    if isinstance(node, list):
+        for item in node:
+            stamp_part_counts(item)
+        return
+    if not isinstance(node, dict):
+        return
+    for value in node.values():
+        stamp_part_counts(value)
+    if 'exactBytes' not in node:
+        return
+    parts = node.get('parts')
+    if isinstance(parts, list) and parts:
+        node['partCount'] = len(parts)
+    elif node.get('downloadUrl'):
+        node['partCount'] = 1
+
+
 def main():
     good_catalog = load(SRC_GOOD)
     good_regions = good_catalog['regions']
@@ -349,6 +378,7 @@ def main():
         catalog['routingPacks'] = packs
 
     det_n = sum(1 for r in regions if r.get('quality') == 'detailed')
+    stamp_part_counts(catalog)
     encoded = json.dumps(catalog, separators=(',', ':'), ensure_ascii=False)
     with open(OUT, 'w', encoding='utf-8') as handle:
         handle.write(encoded)
