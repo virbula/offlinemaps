@@ -56,7 +56,11 @@ SRC_HASHES = os.path.join(INPUTS, 'country-archive-metadata.jsonl')
 SRC_PARTS = os.path.join(INPUTS, 'partsjson')
 SRC_ADMIN0 = os.path.join(
     REPO, 'build/local/cache/worldwide-boundaries/admin-0-map-units.geojson')
-CONTINENT_DIR = os.path.join(REPO, 'build/continent-routing')
+# Overridable for the same reason as CATALOG_INPUT_DIR: the descriptors are
+# per-cycle build products, and a catalog can legitimately be assembled from a
+# staged copy of them rather than from whatever a local build left behind.
+CONTINENT_DIR = os.environ.get(
+    'CATALOG_CONTINENT_DIR', os.path.join(REPO, 'build/continent-routing'))
 OUT = os.path.join(INPUTS, 'catalog-complete.json')
 
 POI_RELEASE = 'poi-2026.08.1'
@@ -380,7 +384,23 @@ def search_indexes(generated_at, inputs=None):
                 'updatedAt': generated_at,
             }
             for region_id in index['regionIds']:
-                by_region.setdefault(region_id, {})[tier] = block
+                claimed = by_region.setdefault(region_id, {})
+                previous = claimed.get(tier)
+                if previous is not None and previous['file'] != block['file']:
+                    # Two indexes of the same tier claiming one region means the
+                    # later would silently replace the earlier, and which won
+                    # would depend on manifest order. The country indexes are
+                    # the live risk: plan_search_release lists a country index's
+                    # regionIds as its member regions, so dropping one into a
+                    # regional manifest would quietly reassign every state to
+                    # the country file.
+                    raise SystemExit(
+                        f'two {tier} indexes both claim {region_id}:\n'
+                        f'  {previous["file"]}\n  {block["file"]}\n'
+                        '  A country-wide index must be attached by country '
+                        'code to the country aggregate entry, not merged into '
+                        'the per-extract mapping.')
+                claimed[tier] = block
         found.append(f'{tier} ({len(manifest["indexes"])})')
     if not found:
         raise SystemExit(

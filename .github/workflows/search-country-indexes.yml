@@ -169,6 +169,17 @@ jobs:
           echo "  $got of $want per-extract indexes present on $tag"
           test "$got" -ge "$want"
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # finalize needs the plan to write the manifest: the descriptors say
+          # what each index contains, and only the plan says which country and
+          # which member regions it stands for.
+          name: country-search-plan-${{ github.run_id }}
+          path: build/search-plan/search-plan.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
   build:
     needs: prepare
     if: inputs.dry_run != true
@@ -268,6 +279,8 @@ jobs:
       REPOSITORY: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
       EXPECTED: ${{ needs.prepare.outputs.country_count }}
+      INPUT_TIER: ${{ inputs.tier }}
+      INPUT_VERSION: ${{ inputs.version }}
     steps:
       - name: Require every country index to be present
         run: |
@@ -276,3 +289,54 @@ jobs:
             --jq '[.assets[]|select(.name|test("-country-[0-9]{4}\\.[0-9]{2}\\.[0-9]+\\.sqlite\\.gz$"))]|length')"
           echo "  $got of $EXPECTED country indexes on $RELEASE_TAG"
           test "$got" = "$EXPECTED"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: country-search-plan-${{ github.run_id }}
+          path: build/search-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: country-descriptor-${{ github.run_id }}-*
+          merge-multiple: true
+          path: build/country-descriptors
+
+      - name: Emit the country search manifest the catalog consumes
+        run: |
+          set -euo pipefail
+          # Without this the country indexes are published and unreachable.
+          # Counting the assets proved they exist, but nothing told the catalog
+          # they do, so a user downloading the United States aggregate would
+          # have got its map and routing and no searchable index -- the exact
+          # pattern that left every other family in this cycle invisible.
+          #
+          # Keyed by country code, not by region id. plan_search_release lists a
+          # country index's regionIds as its member extracts, so merging those
+          # into the per-extract mapping would reassign every state to the
+          # country file; the catalog attaches this to the country aggregate
+          # entry instead.
+          jq -s --arg tier "$INPUT_TIER" --arg version "$INPUT_VERSION" \
+             --arg tag "$RELEASE_TAG" \
+             --slurpfile plan build/search-plan/search-plan.json \
+             '{schemaVersion: 1, tier: $tier, version: $version,
+               releaseTag: $tag, scope: "country",
+               indexes: [ .[] as $d
+                 | ($plan[0].countryIndexes[] | select(.file == $d.file)) as $p
+                 | {countryCode: $p.countryCode, file: $d.file,
+                    memberRegionIds: $p.regionIds, graphIds: $p.graphIds,
+                    recordCount: $d.recordCount, exactBytes: $d.exactBytes,
+                    sha256: $d.sha256, compression: $d.compression,
+                    uncompressedBytes: $d.uncompressedBytes,
+                    uncompressedSha256: $d.uncompressedSha256,
+                    format: $d.format, tiers: $d.tiers,
+                    sourceUrl: $p.sourceUrl} ]
+               | sort_by(.countryCode) }' \
+             build/country-descriptors/*.descriptor.json \
+             > build/search-manifest-country.json
+          count="$(jq '.indexes|length' build/search-manifest-country.json)"
+          test "$count" = "$EXPECTED"
+          jq -r '"  \(.indexes|length) country indexes, \([.indexes[].exactBytes]|add/1048576|floor) MiB download, \([.indexes[].uncompressedBytes]|add/1048576|floor) MiB installed"' \
+            build/search-manifest-country.json
+          jq -r '.indexes[]|"    \(.countryCode)  \(.recordCount) records  \(.memberRegionIds|length) regions"' \
+            build/search-manifest-country.json
+          gh release upload "$RELEASE_TAG" build/search-manifest-country.json \
+            -R "$REPOSITORY" --clobber

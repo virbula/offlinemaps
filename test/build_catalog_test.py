@@ -108,6 +108,30 @@ class SearchIndexesTest(unittest.TestCase):
         self.assertEqual(list(indexes['fr-road']), ['places'])
         self.assertEqual(len(found), 1)
 
+    def test_two_indexes_claiming_one_region_is_fatal(self):
+        # The country indexes make this a live risk rather than a theoretical
+        # one: plan_search_release lists a country index's regionIds as its
+        # member regions, so dropping one into a regional manifest would
+        # silently reassign every state to the country file, and which won would
+        # depend on manifest order.
+        self.write('places', [
+            _index('us-alabama', ['us-al-road'], ['streets'], 10, 30),
+            _index('us', ['us-al-road', 'us-ak-road'], ['streets'], 99, 300),
+        ])
+        with self.assertRaises(SystemExit) as caught:
+            bc.search_indexes('2026-08-11T00:00:00Z', self.dir)
+        message = str(caught.exception)
+        self.assertIn('us-al-road', message)
+        self.assertIn('country code', message)
+
+    def test_the_same_index_listed_twice_is_not_a_conflict(self):
+        # Idempotence: re-reading one manifest, or a region legitimately named
+        # twice, must not look like two competing indexes.
+        self.write('places', [_index('fr', ['fr-road', 'fr-road'],
+                                     ['streets'], 10, 30)])
+        indexes, _ = bc.search_indexes('2026-08-11T00:00:00Z', self.dir)
+        self.assertEqual(list(indexes['fr-road']), ['places'])
+
     def test_no_manifest_at_all_is_fatal(self):
         # Publishing a catalog with no search index would leave every region
         # unsearchable offline, and offline search is the one thing the app
