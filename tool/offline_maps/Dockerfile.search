@@ -1,0 +1,46 @@
+# Extractor runtime for build_search_index.py.
+#
+# Exists so a search index builds the same way wherever it is built. The hosted
+# runners are Linux; a self-hosted macOS runner is not, and the differences are
+# not cosmetic -- macOS has no md5sum, ships bash 3.2 without mapfile, and the
+# disk-reclaim step that is free on an ephemeral VM would delete a developer's
+# Homebrew tools. Running the build inside this image removes all of that: the
+# host only has to provide Docker.
+#
+# GitHub Actions cannot use the `container:` key on a macOS runner -- it is
+# Linux-only -- so a job on a self-hosted Mac invokes this with an explicit
+# `docker run` step instead.
+#
+# Built for the host's native architecture. Apple Silicon runs arm64 Linux
+# containers directly, and search-requirements.txt pins the aarch64 wheel so
+# that path needs no emulation.
+FROM python:3.13-slim
+
+# ca-certificates and curl for fetching the extract over HTTPS.
+#
+# libexpat1 and libbz2 are runtime libraries the osmium wheel links against and
+# python:3.13-slim omits. The wheel installs cleanly without them and then fails
+# on import with "libexpat.so.1: cannot open shared object file", which reads
+# like a broken wheel rather than a missing library. libexpat is for the XML
+# reader and libbz2 for .osm.bz2; this pipeline only reads .osm.pbf, but the
+# extension links both regardless of which format is used.
+#
+# Still no build toolchain: osmium must come from a wheel, so a fallback to the
+# sdist fails here loudly instead of quietly compiling something unpinned.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl libexpat1 libbz2-1.0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Copied and installed before the rest so the layer caches: the requirements
+# change once a cycle, the extractor changes often.
+COPY search-requirements.txt /opt/search-requirements.txt
+RUN pip install --no-cache-dir --require-hashes --no-deps \
+        -r /opt/search-requirements.txt \
+    && python -c "import osmium; print('osmium ready')"
+
+# The repository is mounted at run time rather than copied in, so a rebuild is
+# not needed to pick up a change to the extractor.
+ENTRYPOINT ["python"]

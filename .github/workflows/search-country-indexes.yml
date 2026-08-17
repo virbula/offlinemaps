@@ -212,13 +212,22 @@ jobs:
           persist-credentials: false
 
       - name: Reclaim runner disk
+        # Hosted runners only. These paths are throwaway on an ephemeral VM and
+        # real on anyone's machine -- /usr/local/share/boost is a Homebrew
+        # install on a Mac -- so running this on a self-hosted runner would
+        # delete a developer's tools to make room for a PBF.
+        if: runner.environment == 'github-hosted'
         run: |
           set -euo pipefail
           # The United States PBF alone is 12.1 GB, plus the node location
           # cache and the index, which a stock runner's ~14 GB will not hold.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
           df -h / | awk 'NR==2 {print "  free after reclaim: " $4}'
+
+      - name: Report free space
+        if: runner.environment != 'github-hosted'
+        run: df -h . | awk 'NR==2 {print "  free on the runner: " $4}'
 
       - name: Install the extractor runtime
         run: |
@@ -240,7 +249,14 @@ jobs:
           # Geofabrik publishes an MD5 beside every dated extract; a truncated
           # or substituted download would otherwise be indexed and published.
           want="$(curl --fail --silent --max-time 120 "$SOURCE_URL.md5" | awk '{print $1}')"
-          got="$(md5sum "$pbf" | awk '{print $1}')"
+          # md5sum is coreutils and absent on macOS, which ships md5 instead.
+          # Verifying the source is not optional, so this picks whichever exists
+          # rather than skipping the check on a self-hosted Mac.
+          if command -v md5sum >/dev/null 2>&1; then
+            got="$(md5sum "$pbf" | awk '{print $1}')"
+          else
+            got="$(md5 -q "$pbf")"
+          fi
           test "$got" = "$want" || {
             echo "ERROR: $COUNTRY checksum $got != $want" >&2; exit 1; }
           echo "  $COUNTRY source verified: $(du -h "$pbf" | cut -f1)"
@@ -264,17 +280,22 @@ jobs:
           # splits anything over 1900 MiB uncompressed into independently
           # gzipped parts, the same way routing graphs ship. Upload whichever
           # form it produced; the descriptor says which.
-          mapfile -t assets < <(jq -r '
-            if (.parts // []) | length > 0
-            then .parts[].file else .file end' "build/$COUNTRY.descriptor.json")
-          test "${#assets[@]}" -ge 1
-          echo "  uploading ${#assets[@]} asset(s) for $COUNTRY"
-          for asset in "${assets[@]}"; do
+          # A while-read loop, not mapfile: macOS ships bash 3.2, which has no
+          # mapfile, so a self-hosted Mac runner would fail here on syntax
+          # rather than on anything to do with the build.
+          jq -r 'if (.parts // []) | length > 0
+                 then .parts[].file else .file end' \
+            "build/$COUNTRY.descriptor.json" > build/assets.txt
+          test -s build/assets.txt
+          echo "  uploading $(wc -l < build/assets.txt | tr -d ' ') asset(s) for $COUNTRY"
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
             test -f "build/$asset" || { echo "ERROR: missing build/$asset" >&2; exit 1; }
             gh release upload "$RELEASE_TAG" "build/$asset" \
               -R "$REPOSITORY" --clobber
             rm -f "build/$asset"
-          done
+          done < build/assets.txt
+          rm -f build/assets.txt
           rm -rf build/country
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
