@@ -5,13 +5,15 @@ The app fetches exactly one JSON. Every asset URL inside it is immutable and
 points into the release that owns that asset, so the catalog is the only thing
 that has to change when a family is added.
 
-Families and where they live:
-    road z12 (Good)      maps-2026.08.1        554 regional + 25 country
-    road z15 (Detailed)  maps-z15-2026.08.1    553 regional + 25 country
-    POI                  poi-2026.08.1         552 regional + 25 country
-    routing              routing-2026.08.1     regional + whole-country graphs
-    routing, continent   routing-continents-…  7 graphs, the only continent-
-                                               scale release of any family
+Families and where they live, where <cycle> is CATALOG_CYCLE:
+    road z12 (Good)      maps-<cycle>              554 regional + 25 country
+    road z15 (Detailed)  maps-z15-<cycle>          553 regional + 25 country
+    POI                  poi-<cycle>               552 regional + 25 country
+    routing              routing-<cycle>           regional + country graphs
+    routing, continent   routing-continents-<cycle>  7 graphs, the only
+                                               continent-scale release
+    search, places       search-<cycle>            296 indexes
+    search, addresses    search-addresses-<cycle>  296 indexes, a superset
 
 Structure follows the app contract:
   * a Detailed variant is its own entry, id `<base>-detailed`, paired to the
@@ -49,7 +51,19 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 # source, so they are not tracked; point this at the directory holding them.
 INPUTS = os.environ.get('CATALOG_INPUT_DIR', HERE)
 
-SRC_GOOD = os.path.join(INPUTS, 'rel-catalog-2026.08.2.json')
+# The cycle every asset in this catalog belongs to, and the single place it is
+# written. Everything else derives from it, so a new month is one environment
+# variable rather than a search for date strings across the tooling -- there were
+# 21 of them in this file alone, and missing one would publish a catalog that
+# pointed half at the new release and half at the old.
+CYCLE = os.environ.get('CATALOG_CYCLE', '2026.08.1')
+
+# The previous published catalog, used as the base region list. Named separately
+# because it is the PRIOR cycle's artifact and does not follow CYCLE: the 08.1
+# catalog was built from a file tagged 08.2, and next month's will be built from
+# whatever this cycle finally published.
+SRC_GOOD = os.path.join(
+    INPUTS, os.environ.get('CATALOG_BASE_FILE', 'rel-catalog-2026.08.2.json'))
 SRC_DETAILED = os.path.join(INPUTS, 'z15-detailed-records.json')
 SRC_COUNTRY_POI = os.path.join(INPUTS, 'country-poi-catalog.json')
 SRC_HASHES = os.path.join(INPUTS, 'country-archive-metadata.jsonl')
@@ -63,10 +77,13 @@ CONTINENT_DIR = os.environ.get(
     'CATALOG_CONTINENT_DIR', os.path.join(REPO, 'build/continent-routing'))
 OUT = os.path.join(INPUTS, 'catalog-complete.json')
 
-POI_RELEASE = 'poi-2026.08.1'
+POI_RELEASE = f'poi-{CYCLE}'
 # Every family in a cycle shares one version, so the catalog uses the cycle
 # rather than drifting to .2 and .3 and implying newer data than it carries.
-CATALOG_TAG = 'catalog-2026.08.1'
+CATALOG_TAG = f'catalog-{CYCLE}'
+MAP_RELEASE = f'maps-{CYCLE}'
+DETAILED_MAP_RELEASE = f'maps-z15-{CYCLE}'
+ROUTING_RELEASE = f'routing-{CYCLE}'
 
 # Bumped each time the catalog is republished within the same cycle. The
 # version cannot serve this purpose once it is pinned to the cycle, and
@@ -74,7 +91,7 @@ CATALOG_TAG = 'catalog-2026.08.1'
 # put when only the catalog is rebuilt. Without a signal that actually changes,
 # the app would have to diff 1,157 regions to notice a new catalog.
 CATALOG_REVISION = 3
-CONTINENT_RELEASE = 'routing-continents-2026.08.1'
+CONTINENT_RELEASE = f'routing-continents-{CYCLE}'
 DOWNLOAD = 'https://github.com/virbula/offlinemaps/releases/download'
 
 # Search index releases, one per tier. Both are published; the app uses the
@@ -82,8 +99,8 @@ DOWNLOAD = 'https://github.com/virbula/offlinemaps/releases/download'
 # well as house numbers. The places tier stays in the catalog so a smaller
 # download remains available without republishing.
 SEARCH_RELEASES = {
-    'places': 'search-2026.08.1',
-    'addresses': 'search-addresses-2026.08.1',
+    'places': f'search-{CYCLE}',
+    'addresses': f'search-addresses-{CYCLE}',
 }
 
 # Locale tags the catalog uses, mapped to Natural Earth's name columns. Using
@@ -178,7 +195,7 @@ def whole_country_graphs(good_regions):
         path = os.path.join(
             REPO, 'build/countrywide-routing',
             f'{"us" if cc == "US" else "canada"}-countrywide/output',
-            f'{graph_id}-routing-2026.08.1.vtiles.descriptor.json')
+            f'{graph_id}-routing-{CYCLE}.vtiles.descriptor.json')
         if os.path.exists(path):
             graphs[cc] = load(path)['routing']
     return graphs
@@ -221,8 +238,8 @@ def country_entry(cc, scope, quality, names, hashes, multipart, graphs,
     lower = cc.lower()
     detailed = quality == 'detailed'
     suffix = '-detailed' if detailed else ''
-    release = 'maps-z15-2026.08.1' if detailed else 'maps-2026.08.1'
-    filename = f'{lower}-country-road{suffix}-2026.08.1.pmtiles'
+    release = DETAILED_MAP_RELEASE if detailed else MAP_RELEASE
+    filename = f'{lower}-country-road{suffix}-{CYCLE}.pmtiles'
 
     parts = None
     if filename in multipart:
@@ -251,7 +268,7 @@ def country_entry(cc, scope, quality, names, hashes, multipart, graphs,
         'id': f'{lower}-country-road{suffix}',
         'name': names.get(cc, {}).get('en', cc),
         'names': names.get(cc, {}),
-        'version': '2026.08.1',
+        'version': CYCLE,
         'bounds': scope['bounds'],
         'minZoom': 5,
         'maxZoom': 15 if detailed else 12,
@@ -315,7 +332,7 @@ def continent_packs():
     for slug, (code, label) in CONTINENT_NAMES.items():
         path = os.path.join(
             CONTINENT_DIR, f'{slug}-continent/output',
-            f'{slug}-continent-routing-2026.08.1.vtiles.descriptor.json')
+            f'{slug}-continent-routing-{CYCLE}.vtiles.descriptor.json')
         if not os.path.exists(path):
             missing.append(slug)
             continue
@@ -737,9 +754,9 @@ def main():
         'githubRepository': 'virbula/offlinemaps',
         'releaseTag': CATALOG_TAG,
         'catalogReleaseTag': CATALOG_TAG,
-        'mapReleaseTag': 'maps-2026.08.1',
-        'detailedMapReleaseTag': 'maps-z15-2026.08.1',
-        'routingReleaseTag': 'routing-2026.08.1',
+        'mapReleaseTag': MAP_RELEASE,
+        'detailedMapReleaseTag': DETAILED_MAP_RELEASE,
+        'routingReleaseTag': ROUTING_RELEASE,
         'continentRoutingReleaseTag': CONTINENT_RELEASE,
         'poiReleaseTag': POI_RELEASE,
         'source': good_catalog['regions'][1].get('sourceId'),

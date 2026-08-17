@@ -10,6 +10,12 @@
 # current one. pip matches whichever file it selects, so a runner image moving
 # from Python 3.12 to 3.13 does not fail the build with a hash mismatch. The
 # sdist hash is last, as the fallback if no wheel matches.
+#
+# macOS arm64 wheels are pinned too, for the self-hosted runner and for building
+# an index locally. Without them the only artifact pip could match on macOS was
+# the sdist, so it tried to compile osmium from source and failed for want of
+# libosmium, boost and protozero -- an install error that looked like a broken
+# environment rather than a missing pin.
 osmium==4.3.1 \
     --hash=sha256:98faae0c48d34c34e7734608e679566fc7d12528e32853c3fe6919a5a20a752e \
     --hash=sha256:e96217d7e62b76f45eeff05c7e9852cb9ed9b780b017e56117a6bc960b7b73ea \
@@ -18,4 +24,6 @@ osmium==4.3.1 \
     --hash=sha256:0e1d32eb0039cf32556db140b46842453fa136a3d803d6a86eb1ac9933ff8599 \
     --hash=sha256:ad0caea456c56b058305967f3bb3037517e0e1357aea5106cefa5b2be660d759 \
     --hash=sha256:c7cd8ac42c206003fab5ec3dbff049551f87eaeed8528e4d54f0a88ee850710c \
+    --hash=sha256:0f87db2d4faad40968248561df188054826ef536359598c111b8c0fe021852c1 \
+    --hash=sha256:63e6f7ccd87ed994c74e81981a65f0535d9f30fbfd9da6f38814acc80934b516 \
     --hash=sha256:5cc16af5f0f34d5e67c678433f6ddda6e37f086ab3cf4ac3b15725fd878f75a8
