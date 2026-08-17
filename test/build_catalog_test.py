@@ -194,6 +194,44 @@ class AttachSearchTest(unittest.TestCase):
         self.assertNotIn('search', country)
 
 
+class ClampBoundsTest(unittest.TestCase):
+    """Antarctica's pack was published and then silently discarded by the app.
+
+    Its routing graph covers -90 to -60, and the app rejects any bounds past
+    85.0511 degrees because Web Mercator cannot represent them -- so the catalog
+    advertised seven continent packs and the app could use six, with nothing
+    reporting the difference.
+    """
+
+    def test_a_polar_bounds_is_brought_inside_the_limit(self):
+        clamped, changed = bc.clamp_bounds_to_web_mercator(
+            {'west': -180, 'south': -90, 'east': 180, 'north': -60}, 'antarctica')
+        self.assertTrue(changed)
+        self.assertAlmostEqual(clamped['south'], -bc.WEB_MERCATOR_MAX_LATITUDE)
+        # Only the offending edge moves.
+        self.assertEqual(clamped['north'], -60)
+        self.assertEqual(clamped['west'], -180)
+        self.assertEqual(clamped['east'], 180)
+
+    def test_an_ordinary_bounds_is_untouched(self):
+        original = {'west': -25.3, 'south': -49.7, 'east': 72.5, 'north': 37.3}
+        clamped, changed = bc.clamp_bounds_to_web_mercator(original, 'africa')
+        self.assertFalse(changed)
+        self.assertEqual(clamped, original)
+
+    def test_the_northern_edge_clamps_too(self):
+        clamped, changed = bc.clamp_bounds_to_web_mercator(
+            {'west': -180, 'south': 60, 'east': 180, 'north': 89.9}, 'arctic')
+        self.assertTrue(changed)
+        self.assertAlmostEqual(clamped['north'], bc.WEB_MERCATOR_MAX_LATITUDE)
+
+    def test_a_missing_bounds_is_not_invented(self):
+        self.assertEqual(bc.clamp_bounds_to_web_mercator(None, 'x'), (None, False))
+        self.assertEqual(
+            bc.clamp_bounds_to_web_mercator({'west': 0, 'east': 1}, 'x'),
+            ({'west': 0, 'east': 1}, False))
+
+
 class ContinentPacksTest(unittest.TestCase):
     """The regression that motivated all of this."""
 

@@ -321,6 +321,9 @@ def continent_packs():
             continue
         d = load(path)
         routing = json.loads(json.dumps(d['routing']))
+        if routing.get('bounds'):
+            routing['bounds'], _ = clamp_bounds_to_web_mercator(
+                routing['bounds'], f'{slug}-continent routing')
         for part in routing.get('parts') or []:
             part['downloadUrl'] = (
                 f'{DOWNLOAD}/{CONTINENT_RELEASE}/{part["file"]}')
@@ -467,6 +470,46 @@ def attach_search(entry, indexes, country_indexes=None):
         return False
     entry['search'] = json.loads(json.dumps(found))
     return True
+
+
+# Web Mercator cannot represent a latitude beyond this, and the app validates
+# every bounds against it, routing bounds included.
+WEB_MERCATOR_MAX_LATITUDE = 85.0511287798066
+
+
+def clamp_bounds_to_web_mercator(bounds, label):
+    """Brings a bounds inside Web Mercator, reporting it when it has to.
+
+    Antarctica's routing graph covers -90 to -60. The app rejects any bounds
+    reaching past 85.0511 degrees, so the whole antarctica-continent pack parsed
+    as invalid and disappeared from the catalog without a word -- seven packs
+    published, six usable.
+
+    Clamped rather than passed through, because the alternative is relaxing a
+    check that tile math depends on. The cost is confined to the polar cap
+    beyond 85 degrees south, which holds one research station and no road
+    network, so nothing routable is given up. Announced rather than silent: a
+    clamp is a discrepancy between what the graph covers and what the catalog
+    claims, and that belongs in the build output.
+    """
+    if not bounds:
+        return bounds, False
+    south, north = bounds.get('south'), bounds.get('north')
+    if south is None or north is None:
+        return bounds, False
+    clamped = dict(bounds)
+    changed = False
+    if south < -WEB_MERCATOR_MAX_LATITUDE:
+        clamped['south'] = -WEB_MERCATOR_MAX_LATITUDE
+        changed = True
+    if north > WEB_MERCATOR_MAX_LATITUDE:
+        clamped['north'] = WEB_MERCATOR_MAX_LATITUDE
+        changed = True
+    if changed:
+        print(f'  clamped {label} bounds to Web Mercator: '
+              f'south {south} -> {clamped["south"]}, '
+              f'north {north} -> {clamped["north"]}')
+    return clamped, changed
 
 
 def stamp_part_counts(node):
