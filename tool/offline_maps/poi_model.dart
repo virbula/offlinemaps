@@ -755,7 +755,7 @@ class PoiEmptyMarker {
       contents: contents,
       exactBytes: utf8.encode(contents).length,
       sha256: sha256Text(contents),
-      label: 'easyelevation-poi-empty:$planSha256:${region.id}',
+      label: 'virbula-poi-empty:$planSha256:${region.id}',
     );
   }
 
@@ -891,7 +891,7 @@ String poiAssetLabel({
       partCount > 999) {
     throw const AutomationException('POI asset label metadata is invalid.');
   }
-  return 'easyelevation-poi:$planSha256:$logicalSha256:'
+  return 'virbula-poi:$planSha256:$logicalSha256:'
       '$logicalExactBytes:$tileCount:$partIndex/$partCount';
 }
 
@@ -905,7 +905,7 @@ String poiAssetLabel({
 })
 parsePoiAssetLabel(String? label) {
   final match = RegExp(
-    r'^easyelevation-poi:([a-f0-9]{64}):([a-f0-9]{64}):'
+    r'^virbula-poi:([a-f0-9]{64}):([a-f0-9]{64}):'
     r'([1-9][0-9]*):([1-9][0-9]*):([1-9][0-9]*)/([1-9][0-9]*)$',
   ).firstMatch(label ?? '');
   if (match == null) {

@@ -10,7 +10,7 @@ void main() {
 
   setUp(() async {
     temporaryDirectory = await Directory.systemTemp.createTemp(
-      'easy-elevation-worldwide-',
+      'virbula-worldwide-',
     );
   });
 

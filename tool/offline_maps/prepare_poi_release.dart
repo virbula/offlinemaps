@@ -194,7 +194,7 @@ Future<void> preparePoiRelease(PoiPrepareOptions options) async {
         poiRelease = await github.createDraft(
           tag: config.releaseTag,
           target: options.target,
-          title: 'EasyElevation offline POIs ${config.releaseTag}',
+          title: 'Virbula offline POIs ${config.releaseTag}',
           body:
               'Deterministic z12-z15 Protomaps POI companions for the '
               'immutable ${config.mapReleaseTag} regional maps.',
@@ -202,7 +202,7 @@ Future<void> preparePoiRelease(PoiPrepareOptions options) async {
         catalogRelease = await github.createDraft(
           tag: config.catalogReleaseTag,
           target: options.target,
-          title: 'EasyElevation offline catalog ${config.catalogReleaseTag}',
+          title: 'Virbula offline catalog ${config.catalogReleaseTag}',
           body:
               'Catalog joining immutable ${config.mapReleaseTag}, '
               'routing-${config.version}, and ${config.releaseTag}.',
@@ -231,7 +231,7 @@ Future<void> preparePoiRelease(PoiPrepareOptions options) async {
           poiRelease ??= await github.createDraft(
             tag: config.releaseTag,
             target: options.target,
-            title: 'EasyElevation offline POIs ${config.releaseTag}',
+            title: 'Virbula offline POIs ${config.releaseTag}',
             body:
                 'Deterministic z12-z15 Protomaps POI companions for the '
                 'immutable ${config.mapReleaseTag} regional maps.',
@@ -239,7 +239,7 @@ Future<void> preparePoiRelease(PoiPrepareOptions options) async {
           catalogRelease ??= await github.createDraft(
             tag: config.catalogReleaseTag,
             target: options.target,
-            title: 'EasyElevation offline catalog ${config.catalogReleaseTag}',
+            title: 'Virbula offline catalog ${config.catalogReleaseTag}',
             body:
                 'Catalog joining immutable ${config.mapReleaseTag}, '
                 'routing-${config.version}, and ${config.releaseTag}.',
@@ -718,7 +718,7 @@ Future<void> _ensurePlanAsset(
   final matches = assets
       .where((asset) => asset.name == poiPlanAssetName)
       .toList(growable: false);
-  final label = 'easyelevation-poi-plan-sha256:$planSha';
+  final label = 'virbula-poi-plan-sha256:$planSha';
   if (matches.isEmpty) {
     if (!release.draft || assets.isNotEmpty) {
       throw const AutomationException(

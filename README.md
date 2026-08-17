@@ -1,7 +1,7 @@
 # Virbula offline maps
 
 This repository owns the worldwide road-map release automation consumed by
-EasyElevation. It extracts 554 bounded PMTiles packs from the official retained
+Virbula. It extracts 554 bounded PMTiles packs from the official retained
 Protomaps planet archive and builds 297 shared Valhalla routing graphs for 549
 map aliases from
 immutable Geofabrik/OpenStreetMap extracts. Maps and graphs use coordinated

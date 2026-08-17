@@ -227,9 +227,9 @@ jobs:
           set -euo pipefail
           : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
           printf 'POI_TOOL_CACHE=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-tools" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-tools" >> "$GITHUB_ENV"
           printf 'POI_BUILD_CACHE_ROOT=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-build" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-build" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}
@@ -346,9 +346,9 @@ jobs:
           set -euo pipefail
           : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
           printf 'POI_TOOL_CACHE=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-tools" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-tools" >> "$GITHUB_ENV"
           printf 'POI_VALIDATION_STATE_ROOT=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-validation" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-validation" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}
@@ -555,9 +555,9 @@ jobs:
           set -euo pipefail
           : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE is required}"
           printf 'POI_BUILD_CACHE_ROOT=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-build" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-build" >> "$GITHUB_ENV"
           printf 'POI_VALIDATION_STATE_ROOT=%s\n' \
-            "$RUNNER_TOOL_CACHE/../easyelevation-poi-validation" >> "$GITHUB_ENV"
+            "$RUNNER_TOOL_CACHE/../virbula-poi-validation" >> "$GITHUB_ENV"
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
         with:
           sdk: ${{ env.DART_VERSION }}

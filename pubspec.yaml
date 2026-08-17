@@ -1,5 +1,5 @@
 name: offlinemaps_release_automation
-description: Reproducible GitHub Actions automation for EasyElevation map packs.
+description: Reproducible GitHub Actions automation for Virbula map packs.
 publish_to: none
 version: 1.2.0+1
 

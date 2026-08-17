@@ -238,7 +238,7 @@ build_graph() {
   if [[ -f "$ARCHIVE" && -f "$CONTROL/build.complete" ]]; then log "Reusing completed archive."; return; fi
   mkdir -p "$WORK" "$OUTPUT"
   [[ ! -e "$ARCHIVE" ]]
-  local container_name="easy-elevation-$GRAPH_ID-2026-08-1" url expected_bytes expected_md5 source index monitor_pid status
+  local container_name="virbula-$GRAPH_ID-2026-08-1" url expected_bytes expected_md5 source index monitor_pid status
   local docker_args=(run --platform linux/amd64 --rm --network=none --name "$container_name" \
     --volume "$WORK:/work" --volume "$OUTPUT:/output" \
     --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" --env "ARCHIVE_NAME=$(basename "$ARCHIVE")" \

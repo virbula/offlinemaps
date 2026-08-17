@@ -472,7 +472,7 @@ void _validatePlanAsset(
       matches.single.state != 'uploaded' ||
       matches.single.size != exactBytes ||
       matches.single.digest != 'sha256:$sha256' ||
-      matches.single.label != 'easyelevation-poi-plan-sha256:$sha256') {
+      matches.single.label != 'virbula-poi-plan-sha256:$sha256') {
     throw const AutomationException('POI validation plan asset is invalid.');
   }
 }

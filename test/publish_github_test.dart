@@ -283,7 +283,7 @@ void main() {
       'prerelease': false,
       'assets': const <Object?>[],
     }, expectedRepository: 'virbula/offlinemaps');
-    final label = 'easyelevation-routing-source-sha256:${'b' * 64}';
+    final label = 'virbula-routing-source-sha256:${'b' * 64}';
     final asset = GitHubPublishAsset(
       localFile: File('${temporary.path}/route.vtiles.tar'),
       name: 'ad-road-routing-2026.08.1.vtiles.tar',

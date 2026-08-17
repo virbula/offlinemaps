@@ -248,7 +248,7 @@ Future<void> prepareRelease(PrepareOptions options) async {
         release = await github.createDraft(
           tag: tag,
           target: options.target,
-          title: 'EasyElevation offline maps $tag',
+          title: 'Virbula offline maps $tag',
         );
       }
       if (!release.draft && options.mode == 'update') {
@@ -279,7 +279,7 @@ Future<void> prepareRelease(PrepareOptions options) async {
           routingRelease = await github.createDraft(
             tag: routingTag,
             target: options.target,
-            title: 'EasyElevation offline routing $routingTag',
+            title: 'Virbula offline routing $routingTag',
             body: routingReleaseBody,
           );
         }

@@ -202,7 +202,7 @@ jobs:
             # releases/latest/download, so a search release taking that flag
             # would point every client at a release with no catalog.json.
             gh release create "$tag" -R "$REPOSITORY" --draft --latest=false \
-              --title "EasyElevation offline search ${INPUT_TIER} ${INPUT_VERSION}" \
+              --title "Virbula offline search ${INPUT_TIER} ${INPUT_VERSION}" \
               --notes "Offline ${INPUT_TIER} search indexes (SQLite FTS5), one per Geofabrik extract."
           fi
 

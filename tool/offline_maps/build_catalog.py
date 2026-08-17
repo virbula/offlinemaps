@@ -60,7 +60,16 @@ CONTINENT_DIR = os.path.join(REPO, 'build/continent-routing')
 OUT = os.path.join(INPUTS, 'catalog-complete.json')
 
 POI_RELEASE = 'poi-2026.08.1'
-CATALOG_TAG = 'catalog-2026.08.3'
+# Every family in a cycle shares one version, so the catalog uses the cycle
+# rather than drifting to .2 and .3 and implying newer data than it carries.
+CATALOG_TAG = 'catalog-2026.08.1'
+
+# Bumped each time the catalog is republished within the same cycle. The
+# version cannot serve this purpose once it is pinned to the cycle, and
+# generatedAt cannot either: it is inherited from the maps release, so it stays
+# put when only the catalog is rebuilt. Without a signal that actually changes,
+# the app would have to diff 1,157 regions to notice a new catalog.
+CATALOG_REVISION = 3
 CONTINENT_RELEASE = 'routing-continents-2026.08.1'
 DOWNLOAD = 'https://github.com/virbula/offlinemaps/releases/download'
 
@@ -378,7 +387,11 @@ def main():
         # releases/latest/download/catalog.json, which GitHub resolves through
         # the Latest flag, so publishing a new catalog redirects every
         # installed client without an app update.
+        # The cycle, matching every asset in the catalog.
         'catalogVersion': CATALOG_TAG.split('-', 1)[1],
+        # Changes on every republication, so one comparison of the pair tells
+        # the app whether to look further.
+        'catalogRevision': CATALOG_REVISION,
         'generatedAt': good_catalog['generatedAt'],
         'archiveFormat': 'pmtiles',
         'tileType': 'mvt',

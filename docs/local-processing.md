@@ -1,6 +1,6 @@
 # PMTiles offline-map build and publishing pipeline
 
-EasyElevation offline maps are prebuilt Protomaps vector basemaps in PMTiles
+Virbula offline maps are prebuilt Protomaps vector basemaps in PMTiles
 version 3. They are free public GitHub Release assets. The PMTiles-only build
 does not require containers, a database, or a tile-rendering server.
 
@@ -22,7 +22,7 @@ This repository owns the complete local toolchain as well as the GitHub Actions
 automation. `plan_offline_maps`, `validate_offline_maps`, and
 `build_offline_maps` never create or modify a GitHub release. Manual upload is
 kept behind the separately named `publish_offline_maps_github` target and an
-exact release-tag confirmation. The EasyElevation app repository contains only
+exact release-tag confirmation. The Virbula app repository contains only
 thin Makefile delegates to these targets.
 
 The official `pmtiles extract` command reads only the required ranges from a
@@ -130,7 +130,7 @@ to `build/local/output`. `OFFLINE_MAP_TRACKED_METADATA_DIR` selects where a real
 build copies the four reviewable metadata files and defaults to the repository
 root. Dry runs and validation-only runs do not sync tracked metadata. Individual
 directory variables remain available for specialized build hosts. The
-EasyElevation app's `flutter clean` cannot remove any of this repository's map
+Virbula app's `flutter clean` cannot remove any of this repository's map
 state. If scratch and output are on different filesystems, the builder copies
 each verified archive to an output-local `.pmtiles.part` and atomically
 promotes it there. The command:
@@ -220,7 +220,7 @@ possible:
 Use country packs for geographically small countries. Split very large
 countries into states, provinces, or other first-level subdivisions. Packs
 may overlap, but each costs device storage independently. Keep each archive
-below EasyElevation's 1 GiB safety limit; reduce `maxZoom` or split the region
+below Virbula's 1 GiB safety limit; reduce `maxZoom` or split the region
 when necessary. Protomaps notes that each additional maximum zoom roughly
 doubles archive size.
 
@@ -356,7 +356,7 @@ Never replace bytes behind a published versioned URL. Publish a new tag,
 filename, version, and catalog checksum for updates. GitHub's current
 [Release limits](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas)
 allow up to 1,000 assets per release, require each asset to be under 2 GiB, and
-state no total release-size or bandwidth limit. EasyElevation deliberately uses
+state no total release-size or bandwidth limit. Virbula deliberately uses
 a stricter 1 GiB per-pack cap. GitHub Releases are free static distribution,
 not a contracted map CDN or availability SLA, so review the current policy and
 monitor real download behavior before a large worldwide rollout.

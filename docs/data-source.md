@@ -1,6 +1,6 @@
 # Offline data sources
 
-This document identifies every upstream dataset used by the EasyElevation
+This document identifies every upstream dataset used by the Virbula
 offline-map release family. It distinguishes the original data creator from a
 download provider, a processing tool, and the GitHub service that distributes
 finished assets.

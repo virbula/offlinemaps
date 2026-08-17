@@ -162,9 +162,9 @@ Future<void> prepareRoutingBackfill(
       catalogRelease = await github.createDraft(
         tag: catalogTag,
         target: target,
-        title: 'EasyElevation offline catalog $catalogTag',
+        title: 'Virbula offline catalog $catalogTag',
         body:
-            'Joined EasyElevation offline catalog referencing immutable '
+            'Joined Virbula offline catalog referencing immutable '
             '$mapTag road maps and $routingTag Valhalla '
             '$supportedValhallaGraphVersion routing graphs.',
       );
@@ -315,15 +315,15 @@ Future<void> prepareRoutingBackfill(
           routingRelease = await client.createDraft(
             tag: routingTag,
             target: options.target,
-            title: 'EasyElevation offline routing $routingTag',
+            title: 'Virbula offline routing $routingTag',
             body: routingReleaseBody,
           );
           catalogRelease = await client.createDraft(
             tag: catalogTag,
             target: options.target,
-            title: 'EasyElevation offline catalog $catalogTag',
+            title: 'Virbula offline catalog $catalogTag',
             body:
-                'Joined EasyElevation offline catalog referencing immutable '
+                'Joined Virbula offline catalog referencing immutable '
                 '$mapTag road maps and $routingTag Valhalla '
                 '$supportedValhallaGraphVersion routing graphs.',
           );
@@ -782,7 +782,7 @@ recoverMissingRoutingDraft({
   final routingRelease = await github.createDraft(
     tag: routingTag,
     target: currentCatalog.targetCommitish.toLowerCase(),
-    title: 'EasyElevation offline routing $routingTag',
+    title: 'Virbula offline routing $routingTag',
     body: routingReleaseBody,
   );
   validateRecoverableRoutingReleasePair(

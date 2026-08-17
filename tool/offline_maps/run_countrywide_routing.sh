@@ -133,7 +133,7 @@ build_graph() {
   [[ ! -e "$ARCHIVE" ]]
   log "Starting 12-core connected $COUNTRY_NAME Valhalla build."
   docker run --platform linux/amd64 --rm --network=none \
-    --name "easy-elevation-$GRAPH_ID-2026-08-1" \
+    --name "virbula-$GRAPH_ID-2026-08-1" \
     --volume "$WORK:/work" --volume "$SOURCE:/input/country.osm.pbf:ro" \
     --volume "$OUTPUT:/output" --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
     --env "ARCHIVE_NAME=$(basename "$ARCHIVE")" \

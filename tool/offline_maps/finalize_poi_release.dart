@@ -829,7 +829,7 @@ void _validatePlanAsset(
       plans.single.state != 'uploaded' ||
       plans.single.size != exactBytes ||
       plans.single.digest != 'sha256:$sha256' ||
-      plans.single.label != 'easyelevation-poi-plan-sha256:$sha256') {
+      plans.single.label != 'virbula-poi-plan-sha256:$sha256') {
     throw const AutomationException('POI immutable plan asset is invalid.');
   }
 }

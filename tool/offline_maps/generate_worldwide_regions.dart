@@ -7,7 +7,7 @@ import 'package:path/path.dart' as path;
 import 'build_routing.dart';
 
 const String _usage = '''
-Generate a worldwide EasyElevation PMTiles build manifest.
+Generate a worldwide Virbula PMTiles build manifest.
 
 Usage:
   dart run tool/offline_maps/generate_worldwide_regions.dart \\

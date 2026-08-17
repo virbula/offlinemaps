@@ -128,7 +128,7 @@ Future<void> prepareDetailedRelease({
           await github.createDraft(
             tag: tag,
             target: target,
-            title: 'EasyElevation Detailed offline maps $tag',
+            title: 'Virbula Detailed offline maps $tag',
             body:
                 'Detailed maxzoom-15 companion archives. The Good maxzoom-12 release remains the default and is not replaced.',
           );

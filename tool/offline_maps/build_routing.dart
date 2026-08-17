@@ -25,7 +25,7 @@ const List<String> supportedRoutingModes = <String>[
 ];
 const String routingEngine = 'valhalla';
 const String routingAssetProvenanceLabelPrefix =
-    'easyelevation-routing-source-sha256:';
+    'virbula-routing-source-sha256:';
 const String routingAssetPlanLabelSeparator = ':plan-sha256:';
 const String routingDataAttribution = '© OpenStreetMap contributors';
 const String routingDataAttributionUrl =
@@ -37,7 +37,7 @@ const String routingDataSource = 'Geofabrik';
 const String routingDataSourceUrl = 'https://download.geofabrik.de/';
 const String routingReleaseBody =
     'Valhalla routing packs built from Geofabrik/OpenStreetMap data for '
-    'EasyElevation offline use. © OpenStreetMap contributors. Data is '
+    'Virbula offline use. © OpenStreetMap contributors. Data is '
     'available under ODbL 1.0: '
     'https://opendatacommons.org/licenses/odbl/1-0/. Valhalla software is MIT '
     'licensed; generated graph databases remain ODbL-derived data.';
@@ -679,7 +679,7 @@ Future<File> fetchPinnedRoutingSource(
     request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
     request.headers.set(
       HttpHeaders.userAgentHeader,
-      'EasyElevation-routing-builder/1',
+      'Virbula-routing-builder/1',
     );
     final response = await request.close();
     if (response.statusCode != HttpStatus.ok ||

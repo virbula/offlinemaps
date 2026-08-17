@@ -31,7 +31,7 @@ const String supersededRoutingPlan2026081Sha256 =
     '56d1d4e8ea660a0332d3c318df28ba9f270b87f46a7f4932309eec29db743cc5';
 const int supersededRoutingPlan2026081DescriptorCount = 110;
 const String supersededRoutingBindingInventoryLabelPrefix =
-    'easyelevation-superseded-routing-bindings-sha256:';
+    'virbula-superseded-routing-bindings-sha256:';
 final RegExp supersededRoutingPlanAssetPattern = RegExp(
   r'^superseded-routing-plan\.([a-f0-9]{64})\.json$',
 );

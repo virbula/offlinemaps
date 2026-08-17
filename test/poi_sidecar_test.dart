@@ -563,7 +563,7 @@ clustered: true
         size: 1,
         digest: 'sha256:${'1' * 64}',
         state: 'uploaded',
-        label: 'easyelevation-poi-plan-sha256:${'1' * 64}',
+        label: 'virbula-poi-plan-sha256:${'1' * 64}',
       ),
       GitHubReleaseAsset(
         id: 2,
@@ -699,7 +699,7 @@ clustered: true
         ],
       },
       filteredMetadata: <String, Object?>{
-        'name': 'EasyElevation POIs',
+        'name': 'Virbula POIs',
         'format': 'pbf',
         'type': 'overlay',
         'generator': 'tile-join v2.77.0',
@@ -718,7 +718,7 @@ clustered: true
     expect(layer['minzoom'], 12);
     expect(layer['maxzoom'], 15);
     expect(layer['fields'], containsPair('kind_detail', 'String'));
-    expect(metadata['name'], 'EasyElevation POIs');
+    expect(metadata['name'], 'Virbula POIs');
   });
 
   test(

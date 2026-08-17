@@ -8,7 +8,7 @@ import 'build_all.dart';
 import 'build_routing.dart';
 
 const _usage = r'''
-Validate and publish the generated EasyElevation PMTiles bundle as public
+Validate and publish the generated Virbula PMTiles bundle as public
 GitHub Release assets.
 
 Usage:
@@ -194,7 +194,7 @@ class GitHubPublishOptions {
     final tag = _validateTag(parsedManifest.releaseTag);
     final titleValue = values['--release-title']?.trim();
     final title = titleValue == null || titleValue.isEmpty
-        ? 'EasyElevation offline maps $tag'
+        ? 'Virbula offline maps $tag'
         : _validateReleaseTitle(titleValue);
     final targetValue = values['--target']?.trim();
     final target = targetValue == null || targetValue.isEmpty
@@ -1345,7 +1345,7 @@ Future<void> _publishRoutingRelease({
     inputDirectory: options.inputDirectory,
     repository: options.repository,
     tag: tag,
-    releaseTitle: 'EasyElevation offline routing $tag',
+    releaseTitle: 'Virbula offline routing $tag',
     target: options.target,
     resumeDraft: options.resumeDraft,
     dryRun: false,
@@ -1505,7 +1505,7 @@ Future<void> _createDraftRelease(GitHubPublishOptions options) async {
     '--notes',
     options.tag.startsWith('routing-')
         ? routingReleaseBody
-        : 'Free prebuilt road-map downloads for EasyElevation offline use.',
+        : 'Free prebuilt road-map downloads for Virbula offline use.',
     if (options.target != null) ...<String>['--target', options.target!],
   ], failure: 'Could not create draft release ${options.tag}');
 }
@@ -2124,4 +2124,4 @@ String _validateTarget(String value) {
   return value;
 }
 
-const _publisherUserAgent = 'EasyElevation-offline-map-publisher/1';
+const _publisherUserAgent = 'Virbula-offline-map-publisher/1';

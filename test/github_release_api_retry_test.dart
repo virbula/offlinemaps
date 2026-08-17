@@ -406,10 +406,10 @@ void main() {
       'size': 42,
       'digest': 'sha256:${'a' * 64}',
       'state': 'uploaded',
-      'label': 'easyelevation-routing-source-sha256:${'b' * 64}',
+      'label': 'virbula-routing-source-sha256:${'b' * 64}',
     });
 
-    expect(asset.label, 'easyelevation-routing-source-sha256:${'b' * 64}');
+    expect(asset.label, 'virbula-routing-source-sha256:${'b' * 64}');
   });
 
   test('asset metadata update retains exact immutable bytes', () async {

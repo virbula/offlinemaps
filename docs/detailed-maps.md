@@ -61,7 +61,7 @@ archives directly from the draft release.
 ## Catalog and app integration are deferred
 
 This program does not modify, replace, or promote the current catalog and does
-not change EasyElevation. The current catalog continues to reference the
+not change Virbula. The current catalog continues to reference the
 existing `maps-2026.08.1` URLs. The independently verified z15 records retain
 the fields needed for a future reviewed catalog (`qualityId`, stable region id,
 file, bounds, zooms, exact size, whole SHA-256, immutable tagged URLs, source

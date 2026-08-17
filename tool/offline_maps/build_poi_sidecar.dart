@@ -136,7 +136,7 @@ List<String> poiFilterArguments(
   '-l',
   request.config.layer,
   '-n',
-  'EasyElevation POIs',
+  'Virbula POIs',
   '-N',
   'Protomaps POIs for ${request.region.id}, preserved with source feature IDs',
   '-A',

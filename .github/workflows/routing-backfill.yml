@@ -206,7 +206,7 @@ jobs:
           path: build/plan
       - name: Cache every immutable source before any graph is uploaded
         env:
-          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-source-cache
+          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../virbula-routing-source-cache
         run: |
           set -euo pipefail
           plan_sha256="$(jq -er '.routingPlanSha256 | select(test("^[a-f0-9]{64}$"))' build/plan/release.json)"
@@ -289,7 +289,7 @@ jobs:
           test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
       - name: Build, verify, upload, and clean each graph
         env:
-          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-source-cache
+          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../virbula-routing-source-cache
         run: |
           set -euo pipefail
           region_ids="$(jq -er 'if type == "array" and length >= 1 and length <= 3 and all(.[]; test("^[a-z0-9][a-z0-9._-]{0,62}$")) then join(",") else error("invalid routing matrix") end' <<< "$REGION_IDS_JSON")"
@@ -400,7 +400,7 @@ jobs:
       - name: Reassemble and traverse the next exact-plan graph
         id: outputs
         env:
-          ROUTING_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-validation
+          ROUTING_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../virbula-routing-validation
         run: |
           set -euo pipefail
           mkdir -p "$ROUTING_VALIDATION_STATE_ROOT"
@@ -558,8 +558,8 @@ jobs:
       - run: make deps
       - name: Remove only the successfully published exact-plan cache
         env:
-          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-source-cache
-          ROUTING_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../easyelevation-routing-validation
+          ROUTING_CACHE_ROOT: ${{ runner.tool_cache }}/../virbula-routing-source-cache
+          ROUTING_VALIDATION_STATE_ROOT: ${{ runner.tool_cache }}/../virbula-routing-validation
         run: |
           set -euo pipefail
           dart run tool/offline_maps/cleanup_routing_cache.dart \

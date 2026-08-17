@@ -8,7 +8,7 @@ import 'build_region.dart';
 import 'build_routing.dart';
 
 const _usage = '''
-Build every configured EasyElevation PMTiles region sequentially.
+Build every configured Virbula PMTiles region sequentially.
 
 Usage:
   dart run tool/offline_maps/build_all.dart \\
