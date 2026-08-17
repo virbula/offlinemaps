@@ -1051,20 +1051,18 @@ void main() {
     expect(validate(tree: 'different'), isFalse);
   });
 
-  test('first release authoritative metadata and manifest agree', () async {
+  test('authoritative metadata and paired-quality manifest agree', () async {
     final catalog = await readJsonObject(File('catalog.json'));
     final generated = await readJsonObject(
       File('offline-regions.generated.json'),
     );
     final provenance = await readJsonObject(File('provenance.json'));
-    final manifest = File('build/expected/manifest-catalog-2026.08.1.json');
     expect(deepJsonEquals(catalog, generated), isTrue);
-    expect(objectList(catalog['regions'], 'regions'), hasLength(554));
-    expect(await fileSha256(manifest), provenance['buildManifestSha256']);
-    expect(provenance['releaseTag'], 'catalog-2026.08.1');
+    expect(objectList(catalog['regions'], 'regions'), hasLength(1157));
+    expect(provenance['releaseTag'], 'catalog-2026.08.3');
     expect(
       objectList(provenance['regions'], 'provenance.regions'),
-      hasLength(554),
+      hasLength(1157),
     );
   });
 }

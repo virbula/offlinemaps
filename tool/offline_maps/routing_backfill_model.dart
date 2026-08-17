@@ -489,7 +489,9 @@ Map<String, Map<String, Object?>> validateBackfillBaseCatalog({
     for (final region in objectList(manifest['regions'], 'manifest.regions'))
       string(region['id'], 'manifest.id'): region,
   };
-  final records = objectList(catalog['regions'], 'catalog.regions');
+  final records = objectList(catalog['regions'], 'catalog.regions')
+      .where((record) => manifestRegions.containsKey(record['id']))
+      .toList(growable: false);
   if (records.length != expectedBackfillMapRegionCount ||
       manifestRegions.length != expectedBackfillMapRegionCount) {
     throw const AutomationException(
@@ -626,6 +628,10 @@ Map<String, Object?> normalizeBackfillRoadCatalog({
           '$id.routing.exactBytes',
         );
       }
+      final poi = record['poi'];
+      if (poi is Map) {
+        expectedCombined += integer(poi['exactBytes'], '$id.poi.exactBytes');
+      }
       if (combined != expectedCombined) {
         throw AutomationException('$id combined map/routing size is invalid.');
       }
@@ -637,10 +643,11 @@ Map<String, Object?> normalizeBackfillRoadCatalog({
     'archiveFormat': catalog['archiveFormat'],
     'tileType': catalog['tileType'],
     'regions': <Map<String, Object?>>[
-      for (final record in objectList(catalog['regions'], 'catalog.regions'))
+      for (final record in records.values)
         <String, Object?>{
           for (final entry in record.entries)
-            if (!joinedKeys.contains(entry.key)) entry.key: entry.value,
+            if (!joinedKeys.contains(entry.key) && entry.key != 'poi')
+              entry.key: entry.value,
         },
     ],
   };

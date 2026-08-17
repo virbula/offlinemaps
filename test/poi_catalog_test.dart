@@ -18,8 +18,30 @@ void main() {
     config = PoiBuildConfiguration.fromJson(
       jsonDecode(await File('config/offline-poi-build.json').readAsString()),
     );
-    baseCatalog = (jsonDecode(await File('catalog.json').readAsString()) as Map)
-        .cast<String, Object?>();
+    final published =
+        (jsonDecode(await File('catalog.json').readAsString()) as Map)
+            .cast<String, Object?>();
+    baseCatalog = <String, Object?>{
+      ...published,
+      'regions': (published['regions'] as List)
+          .cast<Map>()
+          .where(
+            (record) =>
+                record['quality'] == 'good' &&
+                !'${record['logicalRegionId']}'.endsWith('-country-road'),
+          )
+          .map((record) {
+            final clean = record.cast<String, Object?>()..remove('poi');
+            var combined = clean['exactBytes']! as int;
+            final routing = clean['routing'];
+            if (routing is Map) {
+              combined += routing['exactBytes']! as int;
+            }
+            clean['combinedExactBytes'] = combined;
+            return clean;
+          })
+          .toList(growable: false),
+    };
     final records = (baseCatalog['regions'] as List)
         .cast<Map>()
         .map((record) => record.cast<String, Object?>())
@@ -167,9 +189,7 @@ void main() {
             },
         ],
       };
-      final baseProvenance =
-          (jsonDecode(await File('provenance.json').readAsString()) as Map)
-              .cast<String, Object?>();
+      final baseProvenance = await _legacyProvenance(baseCatalog);
       final directory = await Directory.systemTemp.createTemp(
         'poi-empty-catalog-',
       );
@@ -227,9 +247,7 @@ void main() {
             },
         ],
       };
-      final baseProvenance =
-          (jsonDecode(await File('provenance.json').readAsString()) as Map)
-              .cast<String, Object?>();
+      final baseProvenance = await _legacyProvenance(baseCatalog);
       final directory = await Directory.systemTemp.createTemp('poi-catalog-');
       addTearDown(() => directory.delete(recursive: true));
       final files = await writePoiCatalogMetadata(
@@ -348,4 +366,28 @@ void main() {
       );
     },
   );
+}
+
+Future<Map<String, Object?>> _legacyProvenance(
+  Map<String, Object?> catalog,
+) async {
+  final provenance =
+      (jsonDecode(await File('provenance.json').readAsString()) as Map)
+          .cast<String, Object?>();
+  final ids = (catalog['regions'] as List)
+      .cast<Map>()
+      .map((region) => region['id'])
+      .toSet();
+  provenance['regions'] = (provenance['regions'] as List)
+      .cast<Map>()
+      .where((region) => ids.contains(region['id']))
+      .map(
+        (region) => Map<String, Object?>.fromEntries(
+          region.cast<String, Object?>().entries.where(
+            (entry) => !entry.key.startsWith('poi'),
+          ),
+        ),
+      )
+      .toList(growable: false);
+  return provenance;
 }
