@@ -73,6 +73,15 @@ CATALOG_REVISION = 3
 CONTINENT_RELEASE = 'routing-continents-2026.08.1'
 DOWNLOAD = 'https://github.com/virbula/offlinemaps/releases/download'
 
+# Search index releases, one per tier. Both are published; the app uses the
+# address tier, which is a superset carrying settlements, streets and POIs as
+# well as house numbers. The places tier stays in the catalog so a smaller
+# download remains available without republishing.
+SEARCH_RELEASES = {
+    'places': 'search-2026.08.1',
+    'addresses': 'search-addresses-2026.08.1',
+}
+
 # Locale tags the catalog uses, mapped to Natural Earth's name columns. Using
 # the same source as the existing region names keeps provenance consistent.
 LOCALES = {
@@ -330,6 +339,74 @@ def continent_packs():
             'a catalog without one silently strips continent routing for that '
             'whole landmass.')
     return packs
+
+
+def search_indexes(generated_at, inputs=None):
+    """Maps region id to its search index per tier.
+
+    Keyed by tier rather than flattened to one index because both tiers are
+    published and a region can be served by either. The app picks the address
+    tier; the places tier is a quarter of the size and stays available.
+
+    Both sizes are carried. The compressed figure is what downloads and the
+    inflated one is what the device must store, and they differ by enough that
+    conflating them misleads badly: the address tier is 12.21 GB to fetch and
+    46.67 GB installed. Nothing here computes a total, because a region can be
+    reached through several catalog entries and only the app knows which the
+    user picked.
+    """
+    inputs = inputs or INPUTS
+    by_region = {}
+    found = []
+    for tier, release in SEARCH_RELEASES.items():
+        path = os.path.join(inputs, f'search-manifest-{tier}.json')
+        if not os.path.exists(path):
+            continue
+        manifest = load(path)
+        version = manifest['version']
+        for index in manifest['indexes']:
+            block = {
+                'file': index['file'],
+                'downloadUrl': f'{DOWNLOAD}/{release}/{index["file"]}',
+                'version': version,
+                'recordCount': index['recordCount'],
+                'exactBytes': index['exactBytes'],
+                'sha256': index['sha256'],
+                'uncompressedBytes': index['uncompressedBytes'],
+                'uncompressedSha256': index['uncompressedSha256'],
+                'compression': index['compression'],
+                'format': index['format'],
+                'tiers': sorted(index['tiers']),
+                'updatedAt': generated_at,
+            }
+            for region_id in index['regionIds']:
+                by_region.setdefault(region_id, {})[tier] = block
+        found.append(f'{tier} ({len(manifest["indexes"])})')
+    if not found:
+        raise SystemExit(
+            'no search manifests found under ' + inputs + '\n'
+            '  expected search-manifest-places.json and/or '
+            'search-manifest-addresses.json\n'
+            '  Publishing a catalog with no search index at all would leave '
+            'every region unsearchable offline, which is the one thing the '
+            'app cannot fall back from.')
+    return by_region, found
+
+
+def attach_search(entry, indexes):
+    """Puts the search node on one catalog entry, if an index covers it.
+
+    Matched on logicalRegionId so the Good and Detailed variants of a region
+    both carry it. Search is independent of map zoom -- the same index answers
+    either -- so this follows routing, which both variants keep, rather than
+    poi, which only the Good entry carries.
+    """
+    key = entry.get('logicalRegionId') or entry['id']
+    found = indexes.get(key) or indexes.get(entry['id'])
+    if not found:
+        return False
+    entry['search'] = json.loads(json.dumps(found))
+    return True
 
 
 def stamp_part_counts(node):

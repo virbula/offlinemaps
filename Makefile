@@ -267,6 +267,10 @@ check: deps
 	$(DART) format --output=none --set-exit-if-changed tool test
 	$(DART) analyze
 	$(DART) test
+# The Python producers were entirely uncovered, which is how build_catalog.py
+# came to drop a continent in silence. Standard library unittest, so this needs
+# no environment beyond the python3 the tools already require.
+	python3 -m unittest discover -s test -p "*_test.py"
 
 .PHONY: test_poi_sidecars
 test_poi_sidecars: deps poi_tools
