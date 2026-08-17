@@ -369,24 +369,27 @@ jobs:
           gh release view "$RELEASE_TAG" -R "$REPOSITORY" \
             --json assets --jq '.assets[] | "\(.name) \(.size)"' \
             | sort > build/live-assets.txt
+          # Compared against what each descriptor declares, not against an
+          # arbitrary floor. The previous check rejected anything under 4 KB as
+          # truncated, which failed the run on Pitcairn Islands (31 rows) and
+          # Tokelau (16 rows) -- both perfectly valid, because a gzipped SQLite
+          # for a fifty-person territory really is about 2 KB. An exact size
+          # match catches genuine truncation without guessing at a minimum.
+          jq -s 'map({(.file): .exactBytes})|add' \
+            build/search-descriptors/*.descriptor.json > build/expected-sizes.json
           missing=0
           while read -r name; do
-            size="$(awk -v n="$name" '$1 == n {print $2}' build/live-assets.txt)"
-            if [[ -z "$size" ]]; then
+            want="$(jq -r --arg n "$name" '.[$n] // empty' build/expected-sizes.json)"
+            got="$(awk -v n="$name" '$1 == n {print $2}' build/live-assets.txt)"
+            if [[ -z "$got" ]]; then
               echo "MISSING $name" >&2; missing=1; continue
             fi
-            # An empty or truncated upload would be indistinguishable from a
-            # country with no searchable data unless the size is checked.
-            if (( size < 4096 )); then
-              echo "TRUNCATED $name ($size bytes)" >&2; missing=1
+            if [[ -n "$want" && "$got" != "$want" ]]; then
+              echo "SIZE MISMATCH $name: $got on the release, $want in its descriptor" >&2
+              missing=1
             fi
           done < <(jq -r '.indexes[].file' build/search-plan/search-plan.json)
           test "$missing" = 0
-          # A plain .sqlite slipping through would be silently three times
-          # larger and would fail the device-side gunzip.
-          if grep -qv '\.sqlite\.gz ' <(awk '{print $1" "}' build/live-assets.txt | grep -v '^search-manifest'); then
-            echo "NOTE: non-gzip assets present on the release" >&2
-          fi
           echo "  all $INDEX_COUNT indexes present"
 
       - name: Emit the search manifest the catalog generator consumes
