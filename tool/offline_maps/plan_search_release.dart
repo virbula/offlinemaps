@@ -267,6 +267,40 @@ Future<void> planSearchRelease({
   final releaseTag = tier == 'places'
       ? 'search-$version'
       : 'search-addresses-$version';
+  // Countries whose regions span more than one extract need a merged index.
+  // Geofabrik has no country-level file for the big federations -- the United
+  // States exists only as state extracts and Canada as provincial ones -- so
+  // without this a user who downloads the country aggregate would have to
+  // fetch every constituent index separately, 51 of them for the US.
+  //
+  // Built by merging the per-extract indexes rather than re-extracting, which
+  // costs no extra download and no second parse of a 12 GB PBF. Overlap is
+  // deduplicated, which Russia needs: it is covered by a whole-country extract
+  // *and* eight federal districts.
+  final graphsByCountry = <String, Set<String>>{};
+  for (final entry in regionGraphs.entries) {
+    final code = entry.key.split('-').first;
+    (graphsByCountry[code] ??= <String>{}).add(entry.value! as String);
+  }
+  final countryIndexes = <Map<String, Object?>>[];
+  for (final code in graphsByCountry.keys.toList()..sort()) {
+    final graphIds = graphsByCountry[code]!.toList()..sort();
+    if (graphIds.length < 2) continue;
+    countryIndexes.add(<String, Object?>{
+      'countryCode': code,
+      'file': 'search-$tier-$code-country-$version.sqlite.gz',
+      'graphIds': graphIds,
+      'sourceIndexes': [
+        for (final graphId in graphIds)
+          'search-$tier-$graphId-$version.sqlite.gz',
+      ],
+      'regionIds': [
+        for (final entry in regionGraphs.entries)
+          if (entry.key.split('-').first == code) entry.key,
+      ]..sort(),
+    });
+  }
+
   final plan = <String, Object?>{
     'schemaVersion': 1,
     'tier': tier,
@@ -282,6 +316,8 @@ Future<void> planSearchRelease({
     'compression': searchIndexCompression,
     'projectedIndexBytes': projectedBytes,
     'indexes': indexes,
+    'countryIndexCount': countryIndexes.length,
+    'countryIndexes': countryIndexes,
   };
 
   if (!outputDirectory.existsSync()) {

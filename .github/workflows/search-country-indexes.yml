@@ -1,0 +1,214 @@
+name: Build country-wide search indexes
+
+# Adds a country-wide search index for the federations Geofabrik has no
+# country-level extract for.
+#
+# The United States exists only as 51 state extracts and Canada as 13
+# provincial ones, so the per-extract build leaves those countries with no
+# single index. A user who downloads the "United States" aggregate map would
+# otherwise have to fetch 51 separate search indexes to search it.
+#
+# Merges the indexes already built rather than re-extracting. They exist by the
+# time this runs, so a country index costs no extra download of a 12 GB PBF and
+# no second parse. Overlap is deduplicated, which Russia needs: it is covered
+# by a whole-country extract *and* eight federal districts that repeat it.
+#
+# Runs after the per-extract build for the same tier has finished, and uploads
+# into that same release -- following the country road maps, where a country
+# aggregate lives alongside the regional assets rather than in a release of
+# its own.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Which index family to extend
+        required: true
+        type: choice
+        options: [places, addresses]
+        default: places
+      version:
+        description: Release version, e.g. 2026.08.1
+        required: true
+        type: string
+      dry_run:
+        description: Plan only, upload nothing
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: offlinemaps-search-country-${{ inputs.tier }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DART_VERSION: '3.12.2'
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a trusted manual run
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_NAME" = workflow_dispatch
+          test "$REPOSITORY" = virbula/offlinemaps
+          [[ "$INPUT_VERSION" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]
+
+  prepare:
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      country_count: ${{ steps.plan.outputs.country_count }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_TIER: ${{ inputs.tier }}
+      INPUT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - run: make deps
+
+      - name: Resolve the extracts and plan the country merges
+        id: plan
+        run: |
+          set -euo pipefail
+          mkdir -p build/search-inputs
+          dart run tool/offline_maps/discover_routing_sources.dart \
+            --manifest config/offline-map-build.json \
+            --output-manifest build/search-inputs/source-with-routing.json \
+            --cache-dir build/search-inputs/cache
+          dart run tool/offline_maps/plan_search_release.dart \
+            --manifest build/search-inputs/source-with-routing.json \
+            --output-dir build/search-plan \
+            --tier "$INPUT_TIER" --version "$INPUT_VERSION"
+          matrix="$(jq -c '{include:[.countryIndexes[]|{
+            country:.countryCode, file:.file,
+            sources:(.sourceIndexes|join(","))}]}' build/search-plan/search-plan.json)"
+          test "${#matrix}" -lt 900000
+          count="$(jq -r '.countryIndexCount' build/search-plan/search-plan.json)"
+          test "$count" -ge 1
+          tag="$(jq -er '.releaseTag' build/search-plan/search-plan.json)"
+          printf 'matrix=%s\nrelease_tag=%s\ncountry_count=%s\n' \
+            "$matrix" "$tag" "$count" >> "$GITHUB_OUTPUT"
+          jq -r '.countryIndexes[]|"  \(.countryCode)  \(.graphIds|length) extracts -> \(.file)"' \
+            build/search-plan/search-plan.json
+
+      - name: Require the per-extract build to have finished first
+        run: |
+          set -euo pipefail
+          # Merging half a release would silently produce a country index
+          # missing whole states, which nothing downstream could detect.
+          tag="$(jq -er '.releaseTag' build/search-plan/search-plan.json)"
+          want="$(jq -r '.indexCount' build/search-plan/search-plan.json)"
+          got="$(gh release view "$tag" -R "${{ github.repository }}" \
+            --json assets --jq '[.assets[]|select(.name|endswith(".sqlite.gz"))]|length')"
+          echo "  $got of $want per-extract indexes present on $tag"
+          test "$got" -ge "$want"
+
+  build:
+    needs: prepare
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix).include }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      COUNTRY: ${{ matrix.country }}
+      OUT_FILE: ${{ matrix.file }}
+      SOURCES: ${{ matrix.sources }}
+      INPUT_TIER: ${{ inputs.tier }}
+      INPUT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reclaim runner disk
+        run: |
+          set -euo pipefail
+          # The address tier for the United States merges 51 state indexes into
+          # one, which a stock runner's ~14 GB will not hold.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h / | awk 'NR==2 {print "  free after reclaim: " $4}'
+
+      - name: Install the extractor runtime
+        run: |
+          set -euo pipefail
+          python3 -m venv build/osmvenv
+          build/osmvenv/bin/pip install --quiet --require-hashes --no-deps \
+            -r tool/offline_maps/search-requirements.txt
+
+      - name: Merge the constituent indexes
+        run: |
+          set -euo pipefail
+          mkdir -p build/merge
+          count=0
+          for name in ${SOURCES//,/ }; do
+            gh release download "$RELEASE_TAG" -R "$REPOSITORY" \
+              --pattern "$name" --dir build/merge --clobber
+            count=$((count + 1))
+          done
+          echo "  downloaded $count constituent index(es) for $COUNTRY"
+          build/osmvenv/bin/python tool/offline_maps/build_search_index.py \
+            --merge build/merge/*.sqlite.gz \
+            --output "build/${OUT_FILE%.gz}" \
+            --region-id "$COUNTRY-country" \
+            --version "$INPUT_VERSION" \
+            --compress \
+            --descriptor "build/$COUNTRY.descriptor.json"
+          test "$(jq -er '.file' "build/$COUNTRY.descriptor.json")" = "$OUT_FILE"
+          gh release upload "$RELEASE_TAG" "build/$OUT_FILE" \
+            -R "$REPOSITORY" --clobber
+          rm -rf build/merge "build/$OUT_FILE"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: country-descriptor-${{ github.run_id }}-${{ matrix.country }}
+          path: build/${{ matrix.country }}.descriptor.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  finalize:
+    needs: [prepare, build]
+    if: inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      EXPECTED: ${{ needs.prepare.outputs.country_count }}
+    steps:
+      - name: Require every country index to be present
+        run: |
+          set -euo pipefail
+          got="$(gh release view "$RELEASE_TAG" -R "$REPOSITORY" --json assets \
+            --jq '[.assets[]|select(.name|test("-country-[0-9]{4}\\.[0-9]{2}\\.[0-9]+\\.sqlite\\.gz$"))]|length')"
+          echo "  $got of $EXPECTED country indexes on $RELEASE_TAG"
+          test "$got" = "$EXPECTED"

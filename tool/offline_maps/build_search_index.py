@@ -380,6 +380,18 @@ def merge_indexes(sources, destination):
             with gzip.open(source, 'rb') as raw, open(plain, 'wb') as out:
                 shutil.copyfileobj(raw, out, 1024 * 1024)
         db.execute('ATTACH DATABASE ? AS src', (plain,))
+        # Fail with the actual problem rather than SQLite's "no such column".
+        # Indexes from different schema versions cannot be merged, and mixing
+        # them is easy to do by hand when an older release is still around.
+        present = {
+            row[1] for row in db.execute('PRAGMA src.table_info(search)')
+        }
+        missing = set(COLUMNS) - present
+        if missing:
+            raise SystemExit(
+                f'{os.path.basename(source)} is an older index schema, '
+                f'missing {", ".join(sorted(missing))}; rebuild it before '
+                'merging')
         db.execute(
             f'INSERT OR IGNORE INTO staging SELECT {columns} FROM src.search')
         db.commit()
