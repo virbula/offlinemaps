@@ -311,7 +311,10 @@ void main() {
       'type': 'FeatureCollection',
       'features': <Object?>[
         <String, Object?>{
-          'properties': <String, Object?>{'id': 'us', 'parent': 'north-america'},
+          'properties': <String, Object?>{
+            'id': 'us',
+            'parent': 'north-america',
+          },
         },
         // Continent-level extracts carry no parent, so absent must read as
         // empty rather than throwing.
@@ -365,13 +368,12 @@ void main() {
       // without a parent path and produce unresolvable source URLs.
       final file = await index(<String, Object?>{
         'features': <Object?>[
-          <String, Object?>{'properties': <String, Object?>{'name': 'no id'}},
+          <String, Object?>{
+            'properties': <String, Object?>{'name': 'no id'},
+          },
         ],
       });
-      expect(
-        () => parentsFromIndex(file),
-        throwsA(isA<AutomationException>()),
-      );
+      expect(() => parentsFromIndex(file), throwsA(isA<AutomationException>()));
     });
 
     test('a malformed feature is skipped rather than fatal', () async {
