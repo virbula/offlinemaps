@@ -30,22 +30,65 @@ def run(args, check=True):
     return result.stdout
 
 
+def _releases_via_rest(repository):
+    out = run(['api', f'repos/{repository}/releases', '--paginate',
+               '--jq', '.[]|{id,tag_name}'], check=False)
+    found = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        found[record['tag_name']] = record['id']
+    return found
+
+
+def _releases_via_graphql(repository):
+    """Second opinion, because the REST list is not always trustworthy.
+
+    Observed returning an empty array for a repository holding ten releases,
+    while fetching any one of them by id or tag still worked. A tool that
+    resolves ids by listing then concludes the release does not exist and either
+    fails or, worse, renames nothing and reports success.
+    """
+    owner, name = repository.split('/', 1)
+    query = ('{repository(owner:"%s",name:"%s"){releases(first:100)'
+             '{nodes{databaseId tagName}}}}' % (owner, name))
+    out = run(['api', 'graphql', '-f', f'query={query}', '--jq',
+               '.data.repository.releases.nodes[]|{id:.databaseId,'
+               'tag_name:.tagName}'], check=False)
+    found = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        found[record['tag_name']] = record['id']
+    return found
+
+
 def release_id(repository, tag):
     """Finds a release by tag, including drafts.
 
     A draft has no git tag behind it, so releases/tags/<tag> returns 404 even
     though the release exists and is addressable by id. Renaming happens while
     the replacement is still a draft, which is exactly when this runs.
+
+    Tries REST first and falls back to GraphQL, which disagree in practice: the
+    REST list came back empty for a repository that plainly had ten releases.
+    Reporting "no release tagged X" when X exists is the failure this avoids.
     """
-    out = run(['api', f'repos/{repository}/releases', '--paginate',
-               '--jq', '.[]|{id,tag_name}'])
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if record['tag_name'] == tag:
-            return record['id']
-    raise SystemExit(f'no release tagged {tag} (drafts included)')
+    for lookup in (_releases_via_rest, _releases_via_graphql):
+        found = lookup(repository)
+        if tag in found:
+            return found[tag]
+        if found:
+            # The listing worked and the tag genuinely is not in it.
+            raise SystemExit(
+                f'no release tagged {tag} (drafts included); '
+                f'{len(found)} releases visible')
+    raise SystemExit(
+        f'could not list the releases of {repository} through REST or GraphQL, '
+        f'so {tag} cannot be resolved. Both returned nothing, which means the '
+        'listing is broken rather than the release being absent.')
 
 
 def descriptor_names(repository, tag):
