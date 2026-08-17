@@ -53,6 +53,27 @@ const int maximumSearchSourceBytes = 10 * 1024 * 1024 * 1024;
 
 const Set<String> searchTiers = <String>{'places', 'addresses'};
 
+/// Country code to Geofabrik feature id, for the federations that have no
+/// single routing extract and so need a country index built separately.
+///
+/// Hardcoded because Geofabrik's ISO metadata cannot be trusted to derive it:
+/// nothing in index-v1.json declares SA at all, Singapore sits inside an
+/// extract advertising only MY, and Kosovo carries no country code. Ten
+/// entries checked by hand beat a lookup that silently resolves the wrong
+/// country. The parent path comes from the index, which is reliable.
+const Map<String, String> countryPbfFeatureIds = <String, String>{
+  'us': 'us',
+  'ca': 'canada',
+  'ru': 'russia',
+  'id': 'indonesia',
+  'br': 'brazil',
+  'in': 'india',
+  'au': 'australia',
+  'cn': 'china',
+  'ua': 'ukraine',
+  'ne': 'niger',
+};
+
 /// Gzipped index bytes per source byte, measured end to end on a full
 /// Luxembourg build (45.2 MB extract): 1.39 MB for places and 8.82 MB for the
 /// self-contained address superset. Used only to project release size, never
@@ -88,11 +109,31 @@ Future<void> main(List<String> arguments) async {
       maximumShardBytes: int.parse(
         values['--max-shard-bytes'] ?? '$defaultSearchShardSourceBytes',
       ),
+      geofabrikParents: values['--geofabrik-index'] == null
+          ? const <String, String>{}
+          : _parentsFromIndex(File(values['--geofabrik-index']!)),
+      sourceDate: values['--source-date'] ?? '',
     );
   } on AutomationException catch (error) {
     stderr.writeln('Search planning failed: ${error.message}');
     exitCode = 2;
   }
+}
+
+/// Feature id to parent path, read from Geofabrik's own index.
+///
+/// Only the parent is taken from the index. Which feature belongs to which
+/// country is decided by [countryPbfFeatureIds], because the index's country
+/// codes are incomplete.
+Map<String, String> _parentsFromIndex(File file) {
+  final decoded = jsonDecode(file.readAsStringSync());
+  final features = (decoded as Map<String, Object?>)['features']! as List;
+  return <String, String>{
+    for (final feature in features.cast<Map<String, Object?>>())
+      (feature['properties']! as Map<String, Object?>)['id']! as String:
+          ((feature['properties']! as Map<String, Object?>)['parent'] ?? '')
+              as String,
+  };
 }
 
 Future<void> planSearchRelease({
@@ -101,6 +142,8 @@ Future<void> planSearchRelease({
   required String tier,
   required String version,
   int maximumShardBytes = defaultSearchShardSourceBytes,
+  Map<String, String> geofabrikParents = const <String, String>{},
+  String sourceDate = '',
 }) async {
   if (maximumShardBytes <= 0 ||
       maximumShardBytes > maximumSearchShardSourceBytes) {
@@ -267,38 +310,55 @@ Future<void> planSearchRelease({
   final releaseTag = tier == 'places'
       ? 'search-$version'
       : 'search-addresses-$version';
-  // Countries whose regions span more than one extract need a merged index.
-  // Geofabrik has no country-level file for the big federations -- the United
-  // States exists only as state extracts and Canada as provincial ones -- so
-  // without this a user who downloads the country aggregate would have to
-  // fetch every constituent index separately, 51 of them for the US.
+  // Countries whose regions span more than one extract need their own index.
+  // Geofabrik has no single routing extract for the big federations -- the
+  // United States is resolved as 51 state files and Canada as 13 provincial
+  // ones -- so without this a user who downloads the country aggregate would
+  // have to fetch every constituent index separately.
   //
-  // Built by merging the per-extract indexes rather than re-extracting, which
-  // costs no extra download and no second parse of a 12 GB PBF. Overlap is
-  // deduplicated, which Russia needs: it is covered by a whole-country extract
-  // *and* eight federal districts.
+  // Extracted from the country's own PBF rather than merged from those
+  // regional indexes. Merging measurably duplicates streets that straddle a
+  // boundary: each extract computes its own centroid for the same road, so the
+  // dedup key differs and both rows survive. Measured at roughly 1% of street
+  // rows across a single boundary between two Dutch provinces, which the
+  // United States, with 51 extracts and far more internal borders, would
+  // multiply. Locality inference degrades the same way, since a border street
+  // can only inherit a settlement that appears in its own extract.
   final graphsByCountry = <String, Set<String>>{};
   for (final entry in regionGraphs.entries) {
     final code = entry.key.split('-').first;
     (graphsByCountry[code] ??= <String>{}).add(entry.value! as String);
   }
   final countryIndexes = <Map<String, Object?>>[];
+  final unresolved = <String>[];
   for (final code in graphsByCountry.keys.toList()..sort()) {
     final graphIds = graphsByCountry[code]!.toList()..sort();
     if (graphIds.length < 2) continue;
+    final feature = countryPbfFeatureIds[code];
+    final parent = feature == null ? null : geofabrikParents[feature];
+    if (feature == null || parent == null || sourceDate.isEmpty) {
+      // Never silently drop a country: a missing entry looks identical to a
+      // country that needed no index at all.
+      unresolved.add(code);
+      continue;
+    }
+    final path = parent.isEmpty ? feature : '$parent/$feature';
     countryIndexes.add(<String, Object?>{
       'countryCode': code,
       'file': 'search-$tier-$code-country-$version.sqlite.gz',
       'graphIds': graphIds,
-      'sourceIndexes': [
-        for (final graphId in graphIds)
-          'search-$tier-$graphId-$version.sqlite.gz',
-      ],
+      'sourceUrl': 'https://download.geofabrik.de/$path-$sourceDate.osm.pbf',
       'regionIds': [
         for (final entry in regionGraphs.entries)
           if (entry.key.split('-').first == code) entry.key,
       ]..sort(),
     });
+  }
+  if (unresolved.isNotEmpty && geofabrikParents.isNotEmpty) {
+    throw AutomationException(
+      'No country PBF resolved for: ${unresolved.join(', ')}. Add them to '
+      'countryPbfFeatureIds, or they will silently lack a country index.',
+    );
   }
 
   final plan = <String, Object?>{
