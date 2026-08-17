@@ -291,14 +291,36 @@ jobs:
             "build/$COUNTRY.descriptor.json" > build/assets.txt
           test -s build/assets.txt
           echo "  uploading $(wc -l < build/assets.txt | tr -d ' ') asset(s) for $COUNTRY"
+          # Retried, because a bare upload threw away a finished build. Canada's
+          # index parsed a 6 GB extract, wrote 184.76 MB and gzipped it to 58.90
+          # MB, and then the upload returned "release not found" during a GitHub
+          # incident and the whole job failed. Hours of work discarded at the
+          # last step by a fault that had cleared seconds later.
+          upload_with_retry() {
+            local asset=$1 attempt=1 delay
+            while :; do
+              if gh release upload "$RELEASE_TAG" "$asset" \
+                   -R "$REPOSITORY" --clobber 2>build/upload.err; then
+                return 0
+              fi
+              if [ "$attempt" -ge 6 ]; then
+                echo "ERROR: upload of $asset failed after $attempt attempts" >&2
+                tail -3 build/upload.err >&2
+                return 1
+              fi
+              delay=$((attempt * attempt * 5))
+              echo "  upload attempt $attempt failed, retrying in ${delay}s: $(tail -1 build/upload.err | cut -c1-90)"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+            done
+          }
           while IFS= read -r asset; do
             [ -n "$asset" ] || continue
             test -f "build/$asset" || { echo "ERROR: missing build/$asset" >&2; exit 1; }
-            gh release upload "$RELEASE_TAG" "build/$asset" \
-              -R "$REPOSITORY" --clobber
+            upload_with_retry "build/$asset"
             rm -f "build/$asset"
           done < build/assets.txt
-          rm -f build/assets.txt
+          rm -f build/assets.txt build/upload.err
           rm -rf build/country
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
