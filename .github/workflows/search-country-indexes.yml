@@ -44,6 +44,14 @@ on:
         required: true
         type: boolean
         default: true
+      source_date:
+        description: >
+          Geofabrik snapshot for the country PBFs, e.g. 260811. Blank resolves
+          it from discovery, which means today's snapshot rather than the one
+          the regional indexes were built from.
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: offlinemaps-search-country-${{ inputs.tier }}
@@ -83,6 +91,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       INPUT_TIER: ${{ inputs.tier }}
       INPUT_VERSION: ${{ inputs.version }}
+      INPUT_SOURCE_DATE: ${{ inputs.source_date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,15 +110,24 @@ jobs:
             --manifest config/offline-map-build.json \
             --output-manifest build/search-inputs/source-with-routing.json \
             --cache-dir build/search-inputs/cache
-          # The cycle's snapshot date, taken from the extracts discovery just
-          # resolved, so the country PBFs come from the same day as everything
-          # else rather than whatever -latest happens to serve.
-          source_date="$(jq -r '[.routingDataset.graphs[].url
-            | capture("-(?<d>[0-9]{6})\\.osm\\.pbf$").d]
-            | group_by(.) | max_by(length) | .[0]' \
-            build/search-inputs/source-with-routing.json)"
+          # The snapshot the country PBFs are taken from. Resolving it here
+          # means today's date, not the date the per-extract indexes in this
+          # same release were built from, and those have already diverged: the
+          # places tier is 295 indexes from 260811 and one from 260815, while
+          # addresses is 296 from 260816. A country index built from a third
+          # date would sit beside them under the same 2026.08.1 label while
+          # describing different ground, so the caller can pin it.
+          if [[ -n "${INPUT_SOURCE_DATE:-}" ]]; then
+            source_date="$INPUT_SOURCE_DATE"
+            echo "  cycle snapshot: $source_date (pinned)"
+          else
+            source_date="$(jq -r '[.routingDataset.graphs[].url
+              | capture("-(?<d>[0-9]{6})\\.osm\\.pbf$").d]
+              | group_by(.) | max_by(length) | .[0]' \
+              build/search-inputs/source-with-routing.json)"
+            echo "  cycle snapshot: $source_date (resolved from discovery)"
+          fi
           [[ "$source_date" =~ ^[0-9]{6}$ ]]
-          echo "  cycle snapshot: $source_date"
           dart run tool/offline_maps/plan_search_release.dart \
             --manifest build/search-inputs/source-with-routing.json \
             --output-dir build/search-plan \
