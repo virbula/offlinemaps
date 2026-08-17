@@ -17,3 +17,8 @@ build/*
 .dart_tool/
 *.tmp
 .DS_Store
+
+# Compiled Python bytecode. Rewritten whenever a tool runs, so tracking
+# it turns every build into a spurious diff.
+__pycache__/
+*.pyc
