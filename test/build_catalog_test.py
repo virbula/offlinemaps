@@ -194,6 +194,170 @@ class AttachSearchTest(unittest.TestCase):
         self.assertNotIn('search', country)
 
 
+class StaleArchiveUrlTest(unittest.TestCase):
+    """The compressed releases carried a URL to a file that does not exist.
+
+    286 of 305 descriptors had a top-level downloadUrl ending in .vtiles.tar,
+    inherited from the uncompressed build, while the archive is .vtiles.tar.gz
+    split into .part files. A tag rewrite cannot fix it: the tag is already
+    right and the filename is wrong.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'tool/offline_maps'))
+        import retag_release_descriptors
+        self.retag = retag_release_descriptors
+
+    def _document(self, url, file='x-routing.vtiles.tar.gz', parts=1):
+        return {'routing': {
+            'file': file,
+            'downloadUrl': url,
+            'parts': [{'file': f'{file}.part00{i + 1}'} for i in range(parts)],
+        }}
+
+    def test_a_url_naming_another_file_is_removed(self):
+        doc = self._document(
+            'https://example.test/releases/download/routing-2026.08.1/'
+            'x-routing.vtiles.tar')
+        self.assertTrue(self.retag.drop_stale_single_url(doc))
+        self.assertNotIn('downloadUrl', doc['routing'])
+
+    def test_a_url_matching_the_archive_is_kept(self):
+        doc = self._document(
+            'https://example.test/releases/download/routing-2026.08.1/'
+            'x-routing.vtiles.tar.gz')
+        self.assertFalse(self.retag.drop_stale_single_url(doc))
+        self.assertIn('downloadUrl', doc['routing'])
+
+    def test_a_single_file_archive_is_never_touched(self):
+        # No parts means the archive really is one asset, and that URL is the
+        # only way to fetch it.
+        doc = {'routing': {
+            'file': 'x-routing.vtiles.tar.gz',
+            'downloadUrl': 'https://example.test/releases/download/t/other.tar',
+        }}
+        self.assertFalse(self.retag.drop_stale_single_url(doc))
+        self.assertIn('downloadUrl', doc['routing'])
+
+    def test_an_absent_url_is_not_an_error(self):
+        doc = {'routing': {'file': 'x.tar.gz', 'parts': [{'file': 'x.part001'}]}}
+        self.assertFalse(self.retag.drop_stale_single_url(doc))
+
+    def test_a_document_without_routing_is_ignored(self):
+        self.assertFalse(self.retag.drop_stale_single_url({}))
+        self.assertFalse(self.retag.drop_stale_single_url({'routing': None}))
+
+    def test_every_5xx_counts_as_transient(self):
+        # A bare "HTTP 500" with no prose matched none of the text markers and
+        # broke out of the retry loop on the first attempt, stopping the rename
+        # partway through 298 descriptors.
+        for message in ('HTTP 500', 'HTTP 502: Bad Gateway', 'HTTP 503',
+                        'HTTP 504 blah'):
+            self.assertTrue(self.retag._is_transient(message), message)
+
+    def test_prose_only_failures_still_count(self):
+        for message in ('release not found', 'No server is currently available',
+                        'connection reset by peer'):
+            self.assertTrue(self.retag._is_transient(message), message)
+
+    def test_a_real_error_is_not_retried(self):
+        # Retrying a genuine rejection wastes two minutes and hides the cause.
+        for message in ('HTTP 401: Bad credentials', 'HTTP 422: validation failed',
+                        'permission denied'):
+            self.assertFalse(self.retag._is_transient(message), message)
+
+
+class BundleCompletenessTest(unittest.TestCase):
+    """A download must arrive with everything its scope promises.
+
+    Every silent loss this cycle looked healthy from every count: the app parsed
+    0 of 1,096 search entries, a continent pack was rejected outright, and 286
+    descriptors named a deleted file. None made one number disagree with another.
+    This check is the one that catches that class at build time.
+    """
+
+    def entry(self, id='fr-road', scope=None, quality=None, **components):
+        e = {'id': id}
+        if scope: e['scope'] = scope
+        if quality: e['quality'] = quality
+        for name, present in components.items():
+            if present: e[name] = {'file': f'{id}.{name}'}
+        return e
+
+    def test_a_complete_z12_bundle_passes(self):
+        entries = [self.entry(routing=True, poi=True, search=True)]
+        self.assertEqual(bc.assert_bundles_complete(entries, []), 0)
+
+    def test_z15_needs_no_poi_sidecar(self):
+        # The detailed maps carry their POIs inside the tiles, so requiring a
+        # sidecar would fail every detailed entry in the catalog.
+        entries = [self.entry(quality='detailed', routing=True, search=True)]
+        self.assertEqual(bc.assert_bundles_complete(entries, []), 0)
+
+    def test_a_missing_search_index_fails_and_names_the_entry(self):
+        entries = [self.entry(id='de-road', routing=True, poi=True)]
+        with self.assertRaises(SystemExit) as caught:
+            bc.assert_bundles_complete(entries, [])
+        self.assertIn('region:search', str(caught.exception))
+        self.assertIn('de-road', str(caught.exception))
+
+    def test_a_missing_routing_graph_fails(self):
+        entries = [self.entry(poi=True, search=True)]
+        with self.assertRaises(SystemExit) as caught:
+            bc.assert_bundles_complete(entries, [])
+        self.assertIn('region:routing', str(caught.exception))
+
+    def test_a_declared_map_only_region_is_exempt(self):
+        # The regions Geofabrik publishes no extract for have no graph and no
+        # index to attach. That is honest -- but it has to be declared, so a
+        # missing component can never pass as an absent one.
+        entry = self.entry(id='world-overview-road')
+        entry['routingAvailable'] = False
+        self.assertEqual(bc.assert_bundles_complete([entry], []), 0)
+
+    def test_a_pack_without_members_fails(self):
+        # A continent pack replaces its members' graphs with one graph, so its
+        # maps and POI and search come from those members. Without the list, a
+        # continent download has nothing to compose from.
+        packs = [{'id': 'x-continent', 'routing': {'file': 'x'},
+                  'memberRegionIds': []}]
+        with self.assertRaises(SystemExit) as caught:
+            bc.assert_bundles_complete([], packs)
+        self.assertIn('continent:memberRegionIds', str(caught.exception))
+
+    def test_a_pack_without_a_graph_fails(self):
+        packs = [{'id': 'x-continent', 'memberRegionIds': ['a-road']}]
+        with self.assertRaises(SystemExit) as caught:
+            bc.assert_bundles_complete([], packs)
+        self.assertIn('continent:routing', str(caught.exception))
+
+    def test_a_waived_gap_reports_but_does_not_fail(self):
+        # Waivers live in source so a gap is argued for rather than tolerated,
+        # and so removing one is a visible change.
+        entries = [self.entry(id='us-country-road', scope='country',
+                              routing=True, poi=True)]
+        self.assertIn('country:search', bc.KNOWN_INCOMPLETE_BUNDLES)
+        self.assertEqual(bc.assert_bundles_complete(entries, []), 1)
+
+    def test_an_unwaived_scope_still_fails_when_a_sibling_is_waived(self):
+        # country:search is waived; country:routing is not.
+        entries = [self.entry(id='us-country-road', scope='country',
+                              poi=True)]
+        with self.assertRaises(SystemExit) as caught:
+            bc.assert_bundles_complete(entries, [])
+        self.assertIn('country:routing', str(caught.exception))
+
+    def test_required_components_by_scope_and_quality(self):
+        self.assertEqual(bc.required_components({'id': 'a'}),
+                         {'routing', 'poi', 'search'})
+        self.assertEqual(bc.required_components({'id': 'a', 'quality': 'detailed'}),
+                         {'routing', 'search'})
+        self.assertEqual(bc.required_components(
+            {'id': 'a', 'routingAvailable': False}), set())
+
+
 class ClampBoundsTest(unittest.TestCase):
     """Antarctica's pack was published and then silently discarded by the app.
 

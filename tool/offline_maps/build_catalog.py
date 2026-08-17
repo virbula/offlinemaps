@@ -512,6 +512,116 @@ def clamp_bounds_to_web_mercator(bounds, label):
     return clamped, changed
 
 
+# Component gaps that are known, accepted for this cycle, and tracked, keyed by
+# the check that would otherwise fail. Anything NOT listed here is a build
+# failure. Waivers live in source so a gap has to be argued for rather than
+# quietly tolerated, and so removing one is a visible change.
+# Each waiver names the entries it covers, so it cannot quietly cover a new one.
+# ALL_ENTRIES is deliberately broad and used only where the gap really is
+# universal; anything narrower has to list its ids, and an unlisted entry with
+# the same gap still fails the build.
+ALL_ENTRIES = '*'
+
+KNOWN_INCOMPLETE_BUNDLES = {
+    'country:search': (
+        ALL_ENTRIES,
+        'Country-wide search indexes are still building (#25). No country has '
+        'one yet, so this is universal rather than per-entry. '
+        'build_catalog.py attaches them by country code as soon as '
+        'search-manifest-country.json exists.'),
+    'continent:memberRegionIds': (
+        {'antarctica-continent'},
+        'Its descriptor declares regionIds [] and the base catalog contains no '
+        'Antarctic region at all, so the graph covers a continent with nothing '
+        'downloadable on it. Real, not a pipeline fault -- but it means '
+        'Antarctica must not be offered as a continent download, since there '
+        'would be no maps to compose with it.'),
+    'region:poi': (
+        {'au-atc-road'},
+        'The Australian Capital Territory yields no POI rows, which the POI '
+        'publisher already records as its one empty region '
+        '(emptyPoiRegionCount 1 in provenance). An empty result, not a missing '
+        'asset.'),
+}
+
+
+def required_components(entry):
+    """Components a downloadable entry must carry, given its scope and quality.
+
+    Every entry is a map, so the map itself is implicit. POI is required only at
+    z12: the z15 maps carry their POIs inside the tiles, which is why the
+    detailed entries deliberately have no sidecar.
+
+    An entry that declares routingAvailable false is genuinely map-only -- the
+    handful of regions Geofabrik publishes no extract for, so no graph and no
+    search index exist to attach. Those are honest, but they have to *say* so;
+    the point of this check is that a missing component can never be mistaken
+    for an absent one.
+    """
+    if entry.get('routingAvailable') is False:
+        return set()
+    components = {'routing', 'search'}
+    if entry.get('quality') != 'detailed':
+        components.add('poi')
+    return components
+
+
+def assert_bundles_complete(regions, packs):
+    """Fails the build when a download would arrive missing something.
+
+    Every silent loss this cycle looked healthy from every count: the app parsed
+    0 of 1,096 search entries, a continent pack was rejected by the parser, and
+    286 descriptors pointed at a deleted file. None of them made a number
+    disagree with another number. This is the check that would have caught all
+    three, so it runs on the assembled catalog rather than trusting the steps
+    that built it.
+    """
+    missing = {}
+    for entry in regions:
+        scope = entry.get('scope') or 'region'
+        for component in sorted(required_components(entry)):
+            if entry.get(component):
+                continue
+            key = f'{scope}:{component}'
+            missing.setdefault(key, []).append(entry['id'])
+
+    # A continent pack replaces its members' individual graphs with one graph;
+    # its maps, POI and search legitimately come from those members. So the pack
+    # must name them, or a continent download has nothing to compose from.
+    for pack in packs:
+        if not pack.get('routing'):
+            missing.setdefault('continent:routing', []).append(pack['id'])
+        if not pack.get('memberRegionIds'):
+            missing.setdefault('continent:memberRegionIds', []).append(pack['id'])
+
+    waived, fatal = [], []
+    for key, ids in sorted(missing.items()):
+        allowed, reason = KNOWN_INCOMPLETE_BUNDLES.get(key, (frozenset(), ''))
+        unwaived = (
+            [] if allowed == ALL_ENTRIES
+            else sorted(set(ids) - set(allowed)))
+        covered = len(ids) - len(unwaived)
+        if covered:
+            waived.append(
+                f'  {key}: {covered} entr{"y" if covered == 1 else "ies"} '
+                f'-- waived: {reason}')
+        if unwaived:
+            fatal.append(
+                f'  {key}: {len(unwaived)} entr'
+                f'{"y" if len(unwaived) == 1 else "ies"} not waived\n'
+                f'    {", ".join(unwaived[:5])}')
+    for line in waived:
+        print(line)
+    if fatal:
+        raise SystemExit(
+            'bundles are incomplete and not waived:\n' + '\n'.join(fatal) +
+            '\n  A download offering fewer components than its scope requires '
+            'leaves the user without something they believe they have. Add the '
+            'component, mark the entry routingAvailable false if it genuinely '
+            'has none, or waive it in KNOWN_INCOMPLETE_BUNDLES with a reason.')
+    return len(missing)
+
+
 def stamp_part_counts(node):
     """Records how many parts each downloadable asset has.
 
@@ -608,6 +718,9 @@ def main():
         catalog['routingPacks'] = packs
 
     det_n = sum(1 for r in regions if r.get('quality') == 'detailed')
+    # Before anything is written. A catalog that ships incomplete bundles is
+    # worse than a build that refused to produce one.
+    assert_bundles_complete(regions, packs)
     stamp_part_counts(catalog)
     encoded = json.dumps(catalog, separators=(',', ':'), ensure_ascii=False)
     with open(OUT, 'w', encoding='utf-8') as handle:
