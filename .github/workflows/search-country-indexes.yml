@@ -227,7 +227,10 @@ jobs:
 
       - name: Report free space
         if: runner.environment != 'github-hosted'
-        run: df -h . | awk 'NR==2 {print "  free on the runner: " $4}'
+        # Block scalar, because the colon-space inside the awk string makes YAML
+        # read a single-line run: as a mapping.
+        run: |
+          df -h . | awk 'NR==2 {print "  free on the runner: " $4}'
 
       - name: Install the extractor runtime
         run: |
