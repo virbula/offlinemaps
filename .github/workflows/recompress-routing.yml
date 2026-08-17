@@ -191,14 +191,23 @@ jobs:
       - name: Require every graph to have arrived
         run: |
           set -euo pipefail
-          got="$(gh api "repos/$REPOSITORY/releases/tags/$TARGET" \
-            --jq '[.assets[]|select(.name|endswith("descriptor.json"))]|length')"
+          # By release id, not by tag. A draft has no git tag behind it, so
+          # releases/tags/<tag> returns 404 for one -- and the target is a
+          # draft until it is deliberately published, which is exactly when
+          # this check runs. Cost a false failure after all 11 shards had
+          # already succeeded.
+          rid="$(gh api "repos/$REPOSITORY/releases" --paginate \
+            --jq ".[]|select(.tag_name==\"$TARGET\")|.id")"
+          test -n "$rid"
+          got="$(gh api "repos/$REPOSITORY/releases/$rid/assets?per_page=100" \
+            --paginate --jq '.[]|select(.name|endswith("descriptor.json"))|.name' | wc -l | tr -d ' ')"
           echo "  descriptors: $got of $EXPECTED"
           test "$got" = "$EXPECTED"
           before="$(gh api "repos/$REPOSITORY/releases/tags/$SOURCE" \
             --jq '[.assets[]|select(.name|test("\\.vtiles\\.tar(\\.part[0-9]{3})?$")).size]|add')"
-          after="$(gh api "repos/$REPOSITORY/releases/tags/$TARGET" \
-            --jq '[.assets[]|select(.name|test("\\.gz(\\.part[0-9]{3})?$")).size]|add')"
+          after="$(gh api "repos/$REPOSITORY/releases/$rid/assets?per_page=100" \
+            --paginate --jq '.[]|select(.name|test("\\.gz(\\.part[0-9]{3})?$"))|.size' \
+            | paste -sd+ - | bc)"
           # Kept to one line: inside a YAML block scalar every continuation
           # must stay indented, so a multi-line -c body breaks the document.
           python3 -c "b=$before; a=$after; print(f'  {b/1e9:.0f} GB -> {a/1e9:.0f} GB ({a/b*100:.0f}%), {(b-a)/1e9:.0f} GB saved'); raise SystemExit(0 if a < b else 'compression did not reduce the release')"
