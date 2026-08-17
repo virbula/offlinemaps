@@ -626,8 +626,19 @@ Map<String, Object?> normalizeBackfillRoadCatalog({
           '$id.routing.exactBytes',
         );
       }
+      // A POI companion counts toward the combined figure too. This check was
+      // written when a region was only a map plus a routing graph, so the
+      // later POI cycle made it reject all 554 regions that gained a
+      // companion: the catalog was right and the arithmetic here was a family
+      // out of date.
+      final poi = record['poi'];
+      if (poi is Map<String, Object?>) {
+        expectedCombined += integer(poi['exactBytes'], '$id.poi.exactBytes');
+      }
       if (combined != expectedCombined) {
-        throw AutomationException('$id combined map/routing size is invalid.');
+        throw AutomationException(
+          '$id combined map/routing/POI size is invalid.',
+        );
       }
     }
   }
@@ -790,13 +801,20 @@ Map<String, Object?> buildJoinedBackfillCatalog({
       );
     }
     final mapBytes = integer(map['exactBytes'], '$id.exactBytes');
+    // Counted the same way the normalizer checks it, POI companion included.
+    // The two must agree exactly, because normalizing a joined catalog has to
+    // reproduce the original byte for byte.
+    final poi = map['poi'];
     joined.add(<String, Object?>{
       ...map,
       'combinedExactBytes':
           mapBytes +
           (routing == null
               ? 0
-              : integer(routing['exactBytes'], '$id.routing.exactBytes')),
+              : integer(routing['exactBytes'], '$id.routing.exactBytes')) +
+          (poi is Map<String, Object?>
+              ? integer(poi['exactBytes'], '$id.poi.exactBytes')
+              : 0),
       'routingAvailable': routing != null,
       'routing': ?routing,
     });

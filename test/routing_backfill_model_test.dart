@@ -84,9 +84,14 @@ void main() {
       );
       expect(andorra['routingAvailable'], isTrue);
       expect(andorra['routing'], routing);
+      // Map plus routing plus the POI companion. The POI term did not exist
+      // when this was written, so the assertion stopped being true the moment
+      // a region gained a companion.
       expect(
         andorra['combinedExactBytes'],
-        (andorra['exactBytes']! as int) + 3031040,
+        (andorra['exactBytes']! as int) +
+            3031040 +
+            ((andorra['poi']! as Map<String, Object?>)['exactBytes']! as int),
       );
       expect(
         andorra['downloadUrl'],

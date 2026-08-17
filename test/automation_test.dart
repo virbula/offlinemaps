@@ -1061,7 +1061,15 @@ void main() {
     expect(deepJsonEquals(catalog, generated), isTrue);
     expect(objectList(catalog['regions'], 'regions'), hasLength(554));
     expect(await fileSha256(manifest), provenance['buildManifestSha256']);
-    expect(provenance['releaseTag'], 'catalog-2026.08.1');
+    // Compared against the configured catalog tag rather than a literal. The
+    // tracked provenance is rewritten by whichever cycle published last, so
+    // pinning it to the first release's tag guaranteed this would fail the
+    // moment a second family shipped -- which is exactly what the POI cycle
+    // did when it moved the catalog on.
+    final poiConfig = await readJsonObject(
+      File('config/offline-poi-build.json'),
+    );
+    expect(provenance['releaseTag'], poiConfig['catalogReleaseTag']);
     expect(
       objectList(provenance['regions'], 'provenance.regions'),
       hasLength(554),

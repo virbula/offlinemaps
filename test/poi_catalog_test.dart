@@ -20,6 +20,24 @@ void main() {
     );
     baseCatalog = (jsonDecode(await File('catalog.json').readAsString()) as Map)
         .cast<String, Object?>();
+    // The tracked catalog has already had POI joined into it by a completed
+    // cycle, and buildPoiJoinedCatalog rightly refuses to join twice. Undo the
+    // join to recover the POI-clean base it expects: the join adds a `poi`
+    // descriptor and folds its bytes into combinedExactBytes, so reversing
+    // both reconstructs the input rather than approximating it.
+    baseCatalog['regions'] = [
+      for (final record in (baseCatalog['regions'] as List).cast<Map>())
+        () {
+          final region = record.cast<String, Object?>();
+          final poi = region.remove('poi');
+          if (poi is Map && region['combinedExactBytes'] is int) {
+            region['combinedExactBytes'] =
+                (region['combinedExactBytes']! as int) -
+                (poi.cast<String, Object?>()['exactBytes']! as int);
+          }
+          return region;
+        }(),
+    ];
     final records = (baseCatalog['regions'] as List)
         .cast<Map>()
         .map((record) => record.cast<String, Object?>())
@@ -167,9 +185,10 @@ void main() {
             },
         ],
       };
-      final baseProvenance =
-          (jsonDecode(await File('provenance.json').readAsString()) as Map)
-              .cast<String, Object?>();
+      final baseProvenance = _poiCleanProvenance(
+        (jsonDecode(await File('provenance.json').readAsString()) as Map)
+            .cast<String, Object?>(),
+      );
       final directory = await Directory.systemTemp.createTemp(
         'poi-empty-catalog-',
       );
@@ -227,9 +246,10 @@ void main() {
             },
         ],
       };
-      final baseProvenance =
-          (jsonDecode(await File('provenance.json').readAsString()) as Map)
-              .cast<String, Object?>();
+      final baseProvenance = _poiCleanProvenance(
+        (jsonDecode(await File('provenance.json').readAsString()) as Map)
+            .cast<String, Object?>(),
+      );
       final directory = await Directory.systemTemp.createTemp('poi-catalog-');
       addTearDown(() => directory.delete(recursive: true));
       final files = await writePoiCatalogMetadata(
@@ -258,7 +278,9 @@ void main() {
       final provenance =
           (jsonDecode(await files['provenance.json']!.readAsString()) as Map)
               .cast<String, Object?>();
-      expect(provenance['releaseTag'], 'catalog-2026.08.2');
+      // The tag this POI cycle publishes to, which the configuration defines
+      // and deliberately keeps distinct from the catalog it reads.
+      expect(provenance['releaseTag'], config.catalogReleaseTag);
       expect(provenance['poiRegionCount'], 553);
       expect(provenance['poiCandidateRegionCount'], 553);
       expect(provenance['emptyPoiRegionCount'], 0);
@@ -348,4 +370,29 @@ void main() {
       );
     },
   );
+}
+
+/// Strips a completed POI cycle back out of the tracked provenance.
+///
+/// provenance.json has already been through a POI run, so every region still
+/// carries poiFile and its companions. A test that asserts an *empty* region
+/// has no poiFile would otherwise be reading last cycle's answer rather than
+/// the one the code under test just produced.
+Map<String, Object?> _poiCleanProvenance(Map<String, Object?> provenance) {
+  const poiKeys = <String>{
+    'poiFile',
+    'poiOutputBytes',
+    'poiOutputSha256',
+    'poiAddressedTiles',
+  };
+  return <String, Object?>{
+    ...provenance,
+    'regions': <Map<String, Object?>>[
+      for (final raw in (provenance['regions'] as List).cast<Map>())
+        <String, Object?>{
+          for (final entry in raw.cast<String, Object?>().entries)
+            if (!poiKeys.contains(entry.key)) entry.key: entry.value,
+        },
+    ],
+  };
 }
