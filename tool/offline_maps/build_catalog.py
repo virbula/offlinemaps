@@ -369,6 +369,16 @@ def main():
     packs = continent_packs()
     catalog = {
         'schemaVersion': good_catalog['schemaVersion'],
+        # The catalog's own version, distinct from schemaVersion, which
+        # describes the format rather than the contents. Without it the app has
+        # to diff 1,157 regions to learn whether anything changed at all; with
+        # it, one string comparison answers that on every launch.
+        #
+        # The app never names this in a URL. It fetches
+        # releases/latest/download/catalog.json, which GitHub resolves through
+        # the Latest flag, so publishing a new catalog redirects every
+        # installed client without an app update.
+        'catalogVersion': CATALOG_TAG.split('-', 1)[1],
         'generatedAt': good_catalog['generatedAt'],
         'archiveFormat': 'pmtiles',
         'tileType': 'mvt',
